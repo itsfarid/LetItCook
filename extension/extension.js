@@ -23,6 +23,7 @@ const STATUS_META = Object.freeze({
 });
 
 const STALE_TIMEOUT_MS = 5 * 60 * 1000;
+const DEBOUNCE_DELAY_MS = 150;
 
 function formatElapsed(ms) {
     if (ms < 0) ms = 0;
@@ -76,6 +77,14 @@ class LetItCookButton extends PanelMenu.Button {
 
         this._currentSessions = [];
         this._currentAggregate = STATUS.UNKNOWN;
+        this._debounceTimerId = null;
+
+        // Lazy menu construction: only build actors when menu opens
+        this._menuOpenId = this.menu.connect('open-state-changed', (menu, isOpen) => {
+            if (isOpen) {
+                this._rebuildMenu();
+            }
+        });
 
         this._watchDir();
         this._startTimer();
@@ -87,11 +96,23 @@ class LetItCookButton extends PanelMenu.Button {
             const dirFile = Gio.File.new_for_path(this._stateDir);
             this._dirMonitor = dirFile.monitor_directory(Gio.FileMonitorFlags.NONE, null);
             this._dirMonitorId = this._dirMonitor.connect('changed', () => {
-                this._update();
+                this._scheduleDebouncedUpdate();
             });
         } catch (e) {
             log(`[LetItCook] Failed to monitor directory: ${e}`);
         }
+    }
+
+    _scheduleDebouncedUpdate() {
+        if (this._debounceTimerId) {
+            GLib.Source.remove(this._debounceTimerId);
+            this._debounceTimerId = null;
+        }
+        this._debounceTimerId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, DEBOUNCE_DELAY_MS, () => {
+            this._debounceTimerId = null;
+            this._update();
+            return GLib.SOURCE_REMOVE;
+        });
     }
 
     _startTimer() {
@@ -176,7 +197,7 @@ class LetItCookButton extends PanelMenu.Button {
             log(`[LetItCook] Error reading sessions: ${e}`);
         }
 
-        // ponytail: sort by status priority desc then recency, upgrade when sorting options needed
+        // ponytail: sort by status priority desc then recency, upgrade when custom sort needed
         sessions.sort((a, b) => {
             const pA = (STATUS_META[a.status] || STATUS_META[STATUS.UNKNOWN]).priority;
             const pB = (STATUS_META[b.status] || STATUS_META[STATUS.UNKNOWN]).priority;
@@ -204,13 +225,12 @@ class LetItCookButton extends PanelMenu.Button {
 
         this._currentAggregate = dominant;
 
-        // Update dot style class
+        // Lightweight indicator update: update dot class and label text only
         for (const st of Object.values(STATUS)) {
             this._dot.remove_style_class_name(`letitcook-dot-${st}`);
         }
         this._dot.add_style_class_name(`letitcook-dot-${dominant}`);
 
-        // Update label
         if (sessions.length === 0) {
             this._label.text = 'LetItCook';
         } else {
@@ -218,7 +238,10 @@ class LetItCookButton extends PanelMenu.Button {
             this._label.text = `${meta.emoji} ${meta.label}`;
         }
 
-        this._rebuildMenu();
+        // Only reconstruct menu items if the popup menu is actively open
+        if (this.menu && this.menu.isOpen) {
+            this._rebuildMenu();
+        }
     }
 
     _rebuildMenu() {
@@ -306,9 +329,17 @@ class LetItCookButton extends PanelMenu.Button {
             GLib.Source.remove(this._timerId);
             this._timerId = null;
         }
+        if (this._debounceTimerId) {
+            GLib.Source.remove(this._debounceTimerId);
+            this._debounceTimerId = null;
+        }
         if (this._dirMonitor) {
             this._dirMonitor.disconnect(this._dirMonitorId);
             this._dirMonitor = null;
+        }
+        if (this._menuOpenId && this.menu) {
+            this.menu.disconnect(this._menuOpenId);
+            this._menuOpenId = null;
         }
         super.destroy();
     }

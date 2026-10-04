@@ -3,10 +3,34 @@ import path from 'node:path';
 import os from 'node:os';
 import { STATUS, normalizeSession } from '../../core/status.js';
 
+let writeCounter = 0;
+
 export function getSessionDir(overrideDir) {
   if (overrideDir) return overrideDir;
   if (process.env.LETITCOOK_STATE_DIR) return process.env.LETITCOOK_STATE_DIR;
   return path.join(os.homedir(), '.local', 'state', 'letitcook', 'sessions');
+}
+
+export function getWriteCount() {
+  return writeCounter;
+}
+
+export function resetWriteCount() {
+  writeCounter = 0;
+}
+
+export function hasMeaningfulStateChange(prev, next) {
+  if (!prev && next) return true;
+  if (prev && !next) return true;
+  if (!prev && !next) return false;
+  return (
+    prev.status !== next.status ||
+    prev.reason !== next.reason ||
+    prev.title !== next.title ||
+    prev.cwd !== next.cwd ||
+    prev.pid !== next.pid ||
+    Boolean(prev.deleted) !== Boolean(next.deleted)
+  );
 }
 
 export function extractSessionId(event) {
@@ -192,6 +216,7 @@ export function writeSessionFile(session, baseDir) {
   // ponytail: atomic rename on POSIX, upgrade to lockfile if cross-device issues occur
   fs.writeFileSync(tmpPath, JSON.stringify(session, null, 2), 'utf8');
   fs.renameSync(tmpPath, filePath);
+  writeCounter++;
 }
 
 export function deleteSessionFile(sessionId, baseDir) {
@@ -232,6 +257,9 @@ export function readAllSessionsFromDir(baseDir, options = {}) {
 
 export default {
   getSessionDir,
+  getWriteCount,
+  resetWriteCount,
+  hasMeaningfulStateChange,
   extractSessionId,
   extractCwd,
   extractTitle,
