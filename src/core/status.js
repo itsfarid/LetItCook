@@ -33,6 +33,7 @@ export function normalizeSession(raw, options = {}) {
       created_at: 0,
       updated_at: 0,
       stale: true,
+      terminated: true,
     };
   }
 
@@ -49,21 +50,44 @@ export function normalizeSession(raw, options = {}) {
   const updatedAt = typeof raw.updated_at === 'number' ? raw.updated_at : (typeof raw.lastEvent === 'number' ? raw.lastEvent : createdAt);
   const reason = String(raw.reason || raw.status || '');
 
+  if (raw.deleted) {
+    return {
+      session_id: sessionId,
+      agent,
+      status: STATUS.UNKNOWN,
+      reason: 'session deleted',
+      title,
+      cwd,
+      pid,
+      created_at: createdAt,
+      updated_at: updatedAt,
+      stale: true,
+      terminated: true,
+    };
+  }
+
   let status = raw.status;
   if (!isValidStatus(status)) {
     status = STATUS.UNKNOWN;
   }
 
   let stale = false;
-  if (status === STATUS.COOKING || status === STATUS.YOUR_TURN) {
-    if (now - updatedAt > staleMs) {
+  let terminated = false;
+
+  const hasPid = pid !== null;
+  const pidAlive = hasPid && isPidAlive ? isPidAlive(pid) : true;
+
+  if (hasPid && isPidAlive && !pidAlive) {
+    if (status === STATUS.DONE || status === STATUS.BURN) {
+      terminated = true;
+    } else if (status === STATUS.COOKING || status === STATUS.YOUR_TURN) {
       stale = true;
       status = STATUS.UNKNOWN;
     }
   }
 
-  if (pid !== null && isPidAlive && (status === STATUS.COOKING || status === STATUS.YOUR_TURN)) {
-    if (!isPidAlive(pid)) {
+  if (!terminated && (status === STATUS.COOKING || status === STATUS.YOUR_TURN)) {
+    if (now - updatedAt > staleMs) {
       stale = true;
       status = STATUS.UNKNOWN;
     }
@@ -80,6 +104,7 @@ export function normalizeSession(raw, options = {}) {
     created_at: createdAt,
     updated_at: updatedAt,
     stale,
+    terminated,
   };
 }
 
@@ -94,7 +119,21 @@ export function aggregateState(sessions = [], options = {}) {
     };
   }
 
-  const normalizedList = sessions.map(s => normalizeSession(s, options));
+  // Filter out terminated sessions
+  const normalizedList = sessions
+    .map(s => normalizeSession(s, options))
+    .filter(s => !s.terminated);
+
+  if (normalizedList.length === 0) {
+    return {
+      status: STATUS.UNKNOWN,
+      meta: STATUS_META[STATUS.UNKNOWN],
+      sessionCount: 0,
+      activeCount: 0,
+      sessions: [],
+    };
+  }
+
   let topPriority = 0;
   let dominantStatus = STATUS.UNKNOWN;
   let activeCount = 0;

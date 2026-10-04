@@ -155,11 +155,26 @@ class LetItCookButton extends PanelMenu.Button {
                         }
 
                         let stale = false;
-                        if (status === STATUS.COOKING || status === STATUS.YOUR_TURN) {
-                            if (now - updatedAt > STALE_TIMEOUT_MS) {
+                        const hasPid = pid !== null;
+                        const isPidAlive = hasPid ? GLib.file_test(`/proc/${pid}`, GLib.FileTest.EXISTS) : true;
+
+                        // Lifecycle check: terminated session removal
+                        if (hasPid && !isPidAlive) {
+                            if (status === STATUS.DONE || status === STATUS.BURN) {
+                                // Session completed/ended and process terminated -> remove state file and exclude
+                                try {
+                                    file.delete(null);
+                                } catch (e) {}
+                                continue;
+                            } else if (status === STATUS.COOKING || status === STATUS.YOUR_TURN) {
+                                // Process died unexpectedly -> mark Unknown (crash)
                                 stale = true;
                                 status = STATUS.UNKNOWN;
-                            } else if (pid !== null && !GLib.file_test(`/proc/${pid}`, GLib.FileTest.EXISTS)) {
+                            }
+                        }
+
+                        if (status === STATUS.COOKING || status === STATUS.YOUR_TURN) {
+                            if (now - updatedAt > STALE_TIMEOUT_MS) {
                                 stale = true;
                                 status = STATUS.UNKNOWN;
                             }

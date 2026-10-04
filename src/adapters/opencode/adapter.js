@@ -241,14 +241,22 @@ export function readAllSessionsFromDir(baseDir, options = {}) {
     try {
       const raw = fs.readFileSync(fullPath, 'utf8');
       const parsed = JSON.parse(raw);
-      sessions.push(normalizeSession(parsed, options));
+      const normalized = normalizeSession(parsed, options);
+      if (normalized.terminated) {
+        deleteSessionFile(normalized.session_id, baseDir);
+      } else {
+        sessions.push(normalized);
+      }
     } catch {
-      sessions.push(normalizeSession({
+      const fallback = normalizeSession({
         session_id: file.replace(/\.json$/, ''),
         agent: 'opencode',
         status: STATUS.UNKNOWN,
         reason: 'corrupted state file',
-      }, options));
+      }, options);
+      if (!fallback.terminated) {
+        sessions.push(fallback);
+      }
     }
   }
 
