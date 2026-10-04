@@ -1,4 +1,10 @@
-import { mapOpenCodeEvent, mapToolHook, writeSessionFile, deleteSessionFile } from './adapter.js';
+import {
+  mapOpenCodeEvent,
+  mapToolHook,
+  writeSessionFile,
+  deleteSessionFile,
+  hasMeaningfulStateChange,
+} from './adapter.js';
 
 const activeSessions = new Map();
 
@@ -21,6 +27,10 @@ export const LetItCookPlugin = async (ctx) => {
         return;
       }
 
+      if (!hasMeaningfulStateChange(prev, mapped)) {
+        return;
+      }
+
       activeSessions.set(sid, mapped);
       try {
         writeSessionFile(mapped);
@@ -30,6 +40,9 @@ export const LetItCookPlugin = async (ctx) => {
       const sid = (input && (input.sessionID || input.sessionId)) || 'global';
       const prev = activeSessions.get(sid) || null;
       const mapped = mapToolHook('before', input, prev);
+      if (!hasMeaningfulStateChange(prev, mapped)) {
+        return;
+      }
       activeSessions.set(sid, mapped);
       try {
         writeSessionFile(mapped);
@@ -39,6 +52,9 @@ export const LetItCookPlugin = async (ctx) => {
       const sid = (input && (input.sessionID || input.sessionId)) || 'global';
       const prev = activeSessions.get(sid) || null;
       const mapped = mapToolHook('after', input, prev);
+      if (!hasMeaningfulStateChange(prev, mapped)) {
+        return;
+      }
       activeSessions.set(sid, mapped);
       try {
         writeSessionFile(mapped);
