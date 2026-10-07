@@ -735,7 +735,7 @@ Current decisions:
 
 **Implementation:** GNOME Shell Extension
 
-**Initial agents:** OpenCode + Goose
+**Initial agents:** OpenCode + GitHub Copilot CLI
 
 **Deployment:** Local
 
@@ -794,7 +794,44 @@ When working on LetItCook:
 
 ---
 
-## 28. Guiding Principle
+## 28. Agent Adapter Status
+
+Current adapter support (2026-10-07, verified on this machine):
+
+| Agent | Version Seen | Status | Mechanism |
+|---|---|---|---|
+| OpenCode | 1.18.35 | **Supported** | Official plugin (`event`, `tool.execute.before/after`) writes state files |
+| GitHub Copilot CLI | 1.0.92 | **Supported** | Documented session-event log (`~/.copilot/session-state/*/events.jsonl` + `workspace.yaml`), replayed by adapter; `src/sync.js` bridges to state dir |
+| Claude Code | 2.1.284 | Detected but unsupported | Has native hooks (`PreToolUse` etc.) + JSONL transcripts; recommended next adapter |
+| Gemini CLI | 0.56.0 | Detected but unsupported | Has `gemini hooks` management; candidate after Claude |
+| Codex CLI | 0.147.0 | Detected but unsupported | Sessions + sqlite state observed; hook/notify mechanism needs research |
+| Goose | 1.46.0 | Detected but unsupported | No hook mechanism found yet; recipes only |
+
+Copilot adapter state reliability (based on the official `session-events.schema.json`
+and 43 real local sessions):
+
+- `Cooking` — high: `session.start`/`resume`, `assistant.turn_start`, tool execution.
+- `Your Turn` — high: `permission.requested` (requires client approval),
+  `user_input.requested`, `elicitation.requested`, `assistant.turn_end`
+  (agent awaiting next input). `abort` with reason `user initiated` is
+  explicitly NOT an error.
+- `Done` — high but rare: only on documented `session.task_complete`
+  with `success: true` (0 occurrences in local data; never inferred from
+  process disappearance or shutdown).
+- `Burn` — high: `session.error` (observed types: `quota`, `rate_limit`),
+  `session.task_complete` with `success: false`, shutdown with `errorReason`.
+- `Unknown` — fallback for anything unresolvable; `session.idle` while
+  previously Cooking maps to Unknown (never infer Your Turn from idle);
+  `session.shutdown` always ends the session (`terminated: true`) without
+  claiming Done.
+
+Sync freshness policy (`syncToStateDir`): stale sessions are never written;
+settled sessions (Done/Burn/Unknown) older than `maxAgeMs` (default 1h) are
+skipped so old history does not clog the panel menu.
+
+---
+
+## 29. Guiding Principle
 
 > **Let the agent cook. Don't babysit it.**
 

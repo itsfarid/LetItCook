@@ -142,12 +142,13 @@ class LetItCookButton extends PanelMenu.Button {
                     if (ok) {
                         const raw = JSON.parse(new TextDecoder().decode(contents));
                         const sessionId = String(raw.session_id || raw.sid || name.replace(/\.json$/, ''));
-                        const agent = String(raw.agent || 'opencode');
+                        const agent = String(raw.agent || 'unknown');
                         const cwd = String(raw.cwd || '');
                         const title = String(raw.title || '');
                         const reason = String(raw.reason || '');
                         const pid = typeof raw.pid === 'number' ? raw.pid : null;
                         const updatedAt = typeof raw.updated_at === 'number' ? raw.updated_at : now;
+                        const confidence = String(raw.confidence || 'medium');
 
                         let status = raw.status;
                         if (!Object.values(STATUS).includes(status)) {
@@ -196,7 +197,7 @@ class LetItCookButton extends PanelMenu.Button {
                 } catch (e) {
                     sessions.push({
                         session_id: name.replace(/\.json$/, ''),
-                        agent: 'opencode',
+                        agent: 'unknown',
                         status: STATUS.UNKNOWN,
                         reason: 'unreadable state',
                         title: '',
@@ -204,6 +205,7 @@ class LetItCookButton extends PanelMenu.Button {
                         pid: null,
                         updated_at: now,
                         stale: true,
+                        confidence: 'low',
                         filePath,
                     });
                 }
