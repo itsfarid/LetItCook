@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import { STATUS, normalizeSession } from '../../core/status.js';
+import { BaseAdapter } from '../base.js';
 
 let writeCounter = 0;
 
@@ -263,6 +264,42 @@ export function readAllSessionsFromDir(baseDir, options = {}) {
   return sessions;
 }
 
+export class OpenCodeAdapter extends BaseAdapter {
+  constructor() {
+    super('opencode', 'OpenCode');
+  }
+
+  isAvailable() {
+    if (typeof process !== 'undefined' && process.env.OPENCODE_BIN) return true;
+    const home = os.homedir();
+    if (fs.existsSync(path.join(home, '.opencode'))) return true;
+    if (process.env.PATH) {
+      const parts = process.env.PATH.split(path.delimiter);
+      for (const p of parts) {
+        if (fs.existsSync(path.join(p, 'opencode'))) return true;
+      }
+    }
+    return false;
+  }
+
+  detectSessions(options = {}) {
+    const dir = options.baseDir || getSessionDir();
+    return readAllSessionsFromDir(dir, options).filter(s => s.agent === this.id);
+  }
+
+  getSessionState(sessionId, options = {}) {
+    const dir = options.baseDir || getSessionDir();
+    const filePath = path.join(dir, `${sessionId}.json`);
+    if (!fs.existsSync(filePath)) return null;
+    try {
+      const raw = JSON.parse(fs.readFileSync(filePath, 'utf8'));
+      return this.normalizeState(raw, options);
+    } catch {
+      return this.normalizeState({ session_id: sessionId, status: STATUS.UNKNOWN, reason: 'unreadable' }, options);
+    }
+  }
+}
+
 export default {
   getSessionDir,
   getWriteCount,
@@ -276,4 +313,5 @@ export default {
   writeSessionFile,
   deleteSessionFile,
   readAllSessionsFromDir,
+  OpenCodeAdapter,
 };

@@ -34,6 +34,7 @@ export function normalizeSession(raw, options = {}) {
       updated_at: 0,
       stale: true,
       terminated: true,
+      confidence: 'low',
     };
   }
 
@@ -49,6 +50,7 @@ export function normalizeSession(raw, options = {}) {
   const createdAt = typeof raw.created_at === 'number' ? raw.created_at : (typeof raw.since === 'number' ? raw.since : now);
   const updatedAt = typeof raw.updated_at === 'number' ? raw.updated_at : (typeof raw.lastEvent === 'number' ? raw.lastEvent : createdAt);
   const reason = String(raw.reason || raw.status || '');
+  const confidence = String(raw.confidence || (raw.status && isValidStatus(raw.status) ? 'high' : 'low'));
 
   if (raw.deleted) {
     return {
@@ -63,21 +65,23 @@ export function normalizeSession(raw, options = {}) {
       updated_at: updatedAt,
       stale: true,
       terminated: true,
+      confidence: 'high',
     };
   }
 
   let status = raw.status;
+  const explicitTerminated = raw.terminated === true;
   if (!isValidStatus(status)) {
     status = STATUS.UNKNOWN;
   }
 
   let stale = false;
-  let terminated = false;
+  let terminated = explicitTerminated;
 
   const hasPid = pid !== null;
   const pidAlive = hasPid && isPidAlive ? isPidAlive(pid) : true;
 
-  if (hasPid && isPidAlive && !pidAlive) {
+  if (!terminated && hasPid && isPidAlive && !pidAlive) {
     if (status === STATUS.DONE || status === STATUS.BURN) {
       terminated = true;
     } else if (status === STATUS.COOKING || status === STATUS.YOUR_TURN) {
@@ -105,6 +109,7 @@ export function normalizeSession(raw, options = {}) {
     updated_at: updatedAt,
     stale,
     terminated,
+    confidence,
   };
 }
 

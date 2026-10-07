@@ -14,6 +14,7 @@ import {
   writeSessionFile,
   deleteSessionFile,
   readAllSessionsFromDir,
+  OpenCodeAdapter,
 } from '../src/adapters/opencode/adapter.js';
 
 function testNormalizeSingleSession() {
@@ -262,11 +263,81 @@ function testFileSystemOperations() {
   }
 }
 
+function testOpenCodeAdapterContract() {
+  const adapter = new OpenCodeAdapter();
+  assert.strictEqual(adapter.id, 'opencode');
+  assert.strictEqual(adapter.name, 'OpenCode');
+  assert.strictEqual(typeof adapter.isAvailable, 'function');
+  assert.strictEqual(typeof adapter.detectSessions, 'function');
+  assert.strictEqual(typeof adapter.getSessionState, 'function');
+  assert.strictEqual(typeof adapter.normalizeState, 'function');
+  assert.strictEqual(typeof adapter.startMonitoring, 'function');
+  assert.strictEqual(typeof adapter.stopMonitoring, 'function');
+}
+
+function testOpenCodeAdapterAvailability() {
+  const adapter = new OpenCodeAdapter();
+  const available = adapter.isAvailable();
+  assert.strictEqual(typeof available, 'boolean', 'isAvailable returns boolean');
+  assert.ok(available, 'OpenCode must be detected as available on this machine');
+}
+
+function testOpenCodeAdapterSessionDiscovery() {
+  const tmpDir = path.join(os.tmpdir(), `letitcook_adapter_${Date.now()}_${Math.random().toString(36).slice(2)}`);
+  try {
+    const adapter = new OpenCodeAdapter();
+    assert.deepStrictEqual(adapter.detectSessions({ baseDir: tmpDir }), [], 'Empty dir discovers no sessions');
+
+    writeSessionFile({
+      session_id: 'ses_abc',
+      agent: 'opencode',
+      status: STATUS.COOKING,
+      reason: 'testing',
+      title: 'Discovery',
+      cwd: '/tmp/x',
+      pid: process.pid,
+      created_at: Date.now(),
+      updated_at: Date.now(),
+    }, tmpDir);
+
+    const found = adapter.detectSessions({ baseDir: tmpDir });
+    assert.strictEqual(found.length, 1, 'Discovers exactly one session');
+    assert.strictEqual(found[0].agent, 'opencode');
+    assert.strictEqual(found[0].status, STATUS.COOKING);
+
+    const single = adapter.getSessionState('ses_abc', { baseDir: tmpDir });
+    assert.ok(single, 'getSessionState returns a session');
+    assert.strictEqual(single.session_id, 'ses_abc');
+
+    assert.strictEqual(adapter.getSessionState('ses_missing', { baseDir: tmpDir }), null, 'Missing session returns null');
+  } finally {
+    try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch {}
+  }
+}
+
+function testOpenCodeAdapterNormalization() {
+  const adapter = new OpenCodeAdapter();
+
+  const norm = adapter.normalizeState({ session_id: 's1', status: STATUS.YOUR_TURN, updated_at: 1000 }, { now: 1000 });
+  assert.strictEqual(norm.status, STATUS.YOUR_TURN);
+  assert.strictEqual(norm.agent, 'opencode', 'agent id forced to adapter id');
+
+  const invalid = adapter.normalizeState({ session_id: 's2', status: 'bogus', updated_at: 1000 }, { now: 1000 });
+  assert.strictEqual(invalid.status, STATUS.UNKNOWN);
+
+  const none = adapter.normalizeState(null, { now: 1000 });
+  assert.strictEqual(none.status, STATUS.UNKNOWN);
+}
+
 function run() {
   testNormalizeSingleSession();
   testAggregateState();
   testOpenCodeEventMapping();
   testFileSystemOperations();
+  testOpenCodeAdapterContract();
+  testOpenCodeAdapterAvailability();
+  testOpenCodeAdapterSessionDiscovery();
+  testOpenCodeAdapterNormalization();
   console.log('All LetItCook state tests passed.');
 }
 
