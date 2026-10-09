@@ -256,7 +256,7 @@ class LetItCookButton extends PanelMenu.Button {
             this._label.text = 'LetItCook';
         } else {
             const meta = STATUS_META[dominant] || STATUS_META[STATUS.UNKNOWN];
-            this._label.text = `${meta.emoji} ${meta.label}`;
+            this._label.text = meta.label;
         }
 
         // Only reconstruct menu items if the popup menu is actively open
