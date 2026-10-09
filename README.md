@@ -38,7 +38,12 @@ npm run sync      # one-shot: sync poll-based adapters (Copilot) into the state 
 node src/sync.js --watch [ms]   # repeat sync every ms (default 5000)
 
 # reload the GNOME extension after changing extension/
+# For GNOME 45+ (ESM):
 cp extension/* ~/.local/share/gnome-shell/extensions/letitcook@letitcook.local/
+
+# For GNOME 42–44 (Legacy):
+cp extension-legacy/* ~/.local/share/gnome-shell/extensions/letitcook@letitcook.local/
+
 # then: Alt+F2 → r (X11) or log out/in (Wayland), or:
 gnome-extensions disable letitcook@letitcook.local && gnome-extensions enable letitcook@letitcook.local
 ```

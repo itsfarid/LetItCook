@@ -1,0 +1,65 @@
+/* LetItCook GNOME Shell Extension Styles */
+
+.letitcook-panel-box {
+  spacing: 6px;
+}
+
+.letitcook-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 5px;
+  margin: 4px 2px;
+}
+
+.letitcook-dot-cooking {
+  background-color: #f1c40f;
+  box-shadow: 0 0 4px #f1c40f;
+}
+
+.letitcook-dot-your_turn {
+  background-color: #e67e22;
+  box-shadow: 0 0 5px #e67e22;
+}
+
+.letitcook-dot-done {
+  background-color: #2ecc71;
+}
+
+.letitcook-dot-burn {
+  background-color: #e74c3c;
+  box-shadow: 0 0 6px #e74c3c;
+}
+
+.letitcook-dot-unknown {
+  background-color: #7f8c8d;
+}
+
+.letitcook-label {
+  font-weight: bold;
+  font-size: 11pt;
+}
+
+.letitcook-menu-header {
+  font-weight: bold;
+  padding: 6px 12px;
+}
+
+.letitcook-session-item {
+  padding: 4px 8px;
+}
+
+.letitcook-session-title {
+  font-weight: bold;
+  font-size: 10.5pt;
+}
+
+.letitcook-session-subtitle {
+  font-size: 9pt;
+  color: #bdc3c7;
+}
+
+.letitcook-empty-label {
+  font-style: italic;
+  color: #7f8c8d;
+  padding: 8px 12px;
+}
