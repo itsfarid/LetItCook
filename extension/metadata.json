@@ -3,9 +3,9 @@
   "name": "LetItCook",
   "description": "Attention indicator for AI coding agents",
   "shell-version": [
-    "42",
-    "43",
-    "44"
+    "45",
+    "46",
+    "47"
   ],
   "version": 1,
   "url": "https://github.com/anomalyco/LetItCook"

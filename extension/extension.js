@@ -1,10 +1,14 @@
-// LetItCook GNOME Shell Extension
-const { Clutter, Gio, GLib, GObject, St } = imports.gi;
-const Main = imports.ui.main;
-const PanelMenu = imports.ui.panelMenu;
-const PopupMenu = imports.ui.popupMenu;
-const ExtensionUtils = imports.misc.extensionUtils;
-const Me = ExtensionUtils.getCurrentExtension();
+// LetItCook GNOME Shell Extension (GNOME 45+ ESM)
+import Clutter from 'gi://Clutter';
+import Gio from 'gi://Gio';
+import GLib from 'gi://GLib';
+import GObject from 'gi://GObject';
+import St from 'gi://St';
+
+import * as Main from 'resource:///org/gnome/shell/ui/main.js';
+import * as PanelMenu from 'resource:///org/gnome/shell/ui/panelMenu.js';
+import * as PopupMenu from 'resource:///org/gnome/shell/ui/popupMenu.js';
+import { Extension } from 'resource:///org/gnome/shell/extensions/extension.js';
 
 const STATUS = Object.freeze({
     COOKING: 'cooking',
@@ -99,7 +103,7 @@ class LetItCookButton extends PanelMenu.Button {
                 this._scheduleDebouncedUpdate();
             });
         } catch (e) {
-            log(`[LetItCook] Failed to monitor directory: ${e}`);
+            console.error(`[LetItCook] Failed to monitor directory: ${e}`);
         }
     }
 
@@ -211,7 +215,7 @@ class LetItCookButton extends PanelMenu.Button {
                 }
             }
         } catch (e) {
-            log(`[LetItCook] Error reading sessions: ${e}`);
+            console.error(`[LetItCook] Error reading sessions: ${e}`);
         }
 
         // ponytail: sort by status priority desc then recency, upgrade when custom sort needed
@@ -362,18 +366,16 @@ class LetItCookButton extends PanelMenu.Button {
     }
 });
 
-let indicator = null;
+export default class LetItCookExtension extends Extension {
+    enable() {
+        this._indicator = new LetItCookButton();
+        Main.panel.addToStatusArea(this.uuid, this._indicator, 1, 'right');
+    }
 
-function init() {}
-
-function enable() {
-    indicator = new LetItCookButton();
-    Main.panel.addToStatusArea('letitcook', indicator, 1, 'right');
-}
-
-function disable() {
-    if (indicator) {
-        indicator.destroy();
-        indicator = null;
+    disable() {
+        if (this._indicator) {
+            this._indicator.destroy();
+            this._indicator = null;
+        }
     }
 }
