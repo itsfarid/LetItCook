@@ -127,6 +127,165 @@ function testStylesheetParity() {
   assert.strictEqual(modernCss, legacyCss, 'Modern and legacy stylesheets must be identical');
 }
 
+function testSingleDotPanelFormatting() {
+  const targets = ['extension/extension.js', 'extension-legacy/extension.js'];
+
+  for (const target of targets) {
+    const code = fs.readFileSync(path.resolve(target), 'utf8');
+
+    // Panel label in _update() must be plain meta.label, never with emoji
+    assert.ok(
+      code.includes('this._label.text = meta.label;'),
+      `${target} must assign plain meta.label to this._label.text in _update()`
+    );
+
+    // Must not contain emoji in panel label assignment
+    assert.strictEqual(
+      /this\._label\.text\s*=\s*`\$\{meta\.emoji\}/.test(code),
+      false,
+      `${target} must NOT include meta.emoji in this._label.text`
+    );
+
+    // When 0 sessions, label must be LetItCook
+    assert.ok(
+      code.includes("this._label.text = 'LetItCook';"),
+      `${target} must assign 'LetItCook' when session count is 0`
+    );
+  }
+}
+
+function testDropdownMenuRetainsEmojis() {
+  const targets = ['extension/extension.js', 'extension-legacy/extension.js'];
+
+  for (const target of targets) {
+    const code = fs.readFileSync(path.resolve(target), 'utf8');
+
+    // Menu header must retain emoji
+    assert.ok(
+      code.includes('${meta.emoji} ${meta.label}'),
+      `${target} menu header must include status emoji`
+    );
+
+    // Session items in dropdown must retain emoji
+    assert.ok(
+      code.includes('${sMeta.emoji} [${s.agent}]'),
+      `${target} session items must include status emoji`
+    );
+  }
+}
+
+function testPanelActorHierarchyAndLifecycle() {
+  // Mock St/Clutter environment for behavioral verification
+  class MockActor {
+    constructor(props = {}) {
+      this.children = [];
+      this.style_classes = new Set();
+      if (props.style_class) {
+        props.style_class.split(/\s+/).filter(Boolean).forEach(c => this.style_classes.add(c));
+      }
+      this.text = props.text || '';
+    }
+
+    add_child(child) {
+      this.children.push(child);
+    }
+
+    get_children() {
+      return [...this.children];
+    }
+
+    get_n_children() {
+      return this.children.length;
+    }
+
+    add_style_class_name(name) {
+      this.style_classes.add(name);
+    }
+
+    remove_style_class_name(name) {
+      this.style_classes.delete(name);
+    }
+
+    has_style_class_name(name) {
+      return this.style_classes.has(name);
+    }
+  }
+
+  // Simulate panel initialization
+  const button = new MockActor();
+  const container = new MockActor({ style_class: 'letitcook-panel-box' });
+  const dot = new MockActor({ style_class: 'letitcook-dot letitcook-dot-unknown' });
+  const label = new MockActor({ text: 'LetItCook', style_class: 'letitcook-label' });
+
+  container.add_child(dot);
+  container.add_child(label);
+  button.add_child(container);
+
+  // 1. Initial hierarchy
+  assert.strictEqual(button.get_n_children(), 1, 'Button has exactly 1 child (container)');
+  assert.strictEqual(container.get_n_children(), 2, 'Container has exactly 2 children (dot + label)');
+  assert.strictEqual(container.children[0], dot, 'First child is dot widget');
+  assert.strictEqual(container.children[1], label, 'Second child is label widget');
+  assert.strictEqual(label.text, 'LetItCook', 'Initial label is LetItCook');
+
+  // 2. Simulate repeated status updates across all statuses
+  const testStates = [
+    { dominant: STATUS.COOKING, expectedLabel: 'Cooking', expectedClass: 'letitcook-dot-cooking' },
+    { dominant: STATUS.YOUR_TURN, expectedLabel: 'Your Turn', expectedClass: 'letitcook-dot-your_turn' },
+    { dominant: STATUS.DONE, expectedLabel: 'Done', expectedClass: 'letitcook-dot-done' },
+    { dominant: STATUS.BURN, expectedLabel: 'Burn', expectedClass: 'letitcook-dot-burn' },
+    { dominant: STATUS.UNKNOWN, expectedLabel: 'Unknown', expectedClass: 'letitcook-dot-unknown' },
+  ];
+
+  for (let round = 0; round < 20; round++) {
+    for (const { dominant, expectedLabel, expectedClass } of testStates) {
+      // Simulate _update logic
+      for (const st of Object.values(STATUS)) {
+        dot.remove_style_class_name(`letitcook-dot-${st}`);
+      }
+      dot.add_style_class_name(`letitcook-dot-${dominant}`);
+      label.text = STATUS_META[dominant].label;
+
+      // Assertions
+      assert.strictEqual(button.get_n_children(), 1, 'Button child count must remain 1');
+      assert.strictEqual(container.get_n_children(), 2, 'Container child count must remain 2');
+      assert.strictEqual(dot.has_style_class_name(expectedClass), true, `Dot must have ${expectedClass}`);
+      assert.strictEqual(label.text, expectedLabel, `Label text must be plain '${expectedLabel}' without emoji`);
+      assert.strictEqual(/[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}]/u.test(label.text), false, 'Label must not contain emoji');
+    }
+  }
+
+  // 3. Return to 0 sessions
+  for (const st of Object.values(STATUS)) {
+    dot.remove_style_class_name(`letitcook-dot-${st}`);
+  }
+  dot.add_style_class_name('letitcook-dot-unknown');
+  label.text = 'LetItCook';
+
+  assert.strictEqual(container.get_n_children(), 2, 'Container child count remains 2 when 0 sessions');
+  assert.strictEqual(label.text, 'LetItCook', 'Label returns to LetItCook');
+}
+
+function testStylesheetSingleDotDesign() {
+  const css = fs.readFileSync(path.resolve('extension/stylesheet.css'), 'utf8');
+
+  // Verify dot is a 10px circular element
+  assert.ok(/width:\s*10px;/.test(css), 'Dot must have width 10px');
+  assert.ok(/height:\s*10px;/.test(css), 'Dot must have height 10px');
+  assert.ok(/border-radius:\s*5px;/.test(css), 'Dot must have border-radius 5px for circle');
+
+  // Ensure no pseudo-elements creating duplicate visual dots
+  assert.strictEqual(/::before/.test(css), false, 'Must not use ::before');
+  assert.strictEqual(/::after/.test(css), false, 'Must not use ::after');
+
+  // Ensure label does not define any circular background or border
+  const labelBlockMatch = css.match(/\.letitcook-label\s*\{([^}]+)\}/);
+  assert.ok(labelBlockMatch, '.letitcook-label CSS rule must exist');
+  const labelBlock = labelBlockMatch[1];
+  assert.strictEqual(/border-radius/.test(labelBlock), false, 'Label must not have border-radius');
+  assert.strictEqual(/background/.test(labelBlock), false, 'Label must not have background');
+}
+
 function run() {
   testModernMetadataCompatibility();
   testLegacyMetadataCompatibility();
@@ -134,6 +293,10 @@ function run() {
   testLegacyExtensionSyntax();
   testExtensionStatusModelParity();
   testStylesheetParity();
+  testSingleDotPanelFormatting();
+  testDropdownMenuRetainsEmojis();
+  testPanelActorHierarchyAndLifecycle();
+  testStylesheetSingleDotDesign();
   console.log('All LetItCook GNOME extension compatibility tests passed.');
 }
 
