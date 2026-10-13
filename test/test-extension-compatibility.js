@@ -295,11 +295,14 @@ function testNotificationIntegrationParity() {
 
     assert.ok(code.includes('_checkNotifications(sessions)'), `${target} must define _checkNotifications`);
     assert.ok(code.includes('_loadNotifyCache()'), `${target} must define _loadNotifyCache`);
-    assert.ok(code.includes('_saveNotifyCache()'), `${target} must define _saveNotifyCache`);
+    assert.ok(code.includes('_saveNotifyCache('), `${target} must define _saveNotifyCache`);
+    assert.ok(code.includes('_lastSavedCacheJson'), `${target} must track _lastSavedCacheJson to avoid idle writes`);
     assert.ok(code.includes('Main.notify('), `${target} must call Main.notify`);
     assert.ok(code.includes('PopupSwitchMenuItem'), `${target} must include PopupSwitchMenuItem for Done toggle`);
     assert.ok(code.includes("'Notify on Done'"), `${target} must include 'Notify on Done' menu toggle`);
     assert.ok(code.includes('notify_cache.json'), `${target} must use notify_cache.json`);
+    assert.ok(code.includes('s.terminated && s.filePath'), `${target} must clean up terminated sessions after notification evaluation`);
+    assert.ok(code.includes('sessions.filter(s => !s.terminated)'), `${target} must exclude terminated sessions from current sessions`);
   }
 }
 

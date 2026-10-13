@@ -183,9 +183,165 @@ function testCliProcessExecution() {
   assert.strictEqual(dispatchFailed, true, '--dispatch must fail execution');
 }
 
+function testTerminatedSessionNotificationEvaluationAndCleanup() {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'letitcook-term-int-'));
+  const sessionDir = path.join(tmpDir, 'sessions');
+  const cachePath = path.join(tmpDir, 'notify_cache.json');
+  fs.mkdirSync(sessionDir, { recursive: true });
+
+  const deadPid = 99999999;
+
+  try {
+    const tracker = new NotificationTracker({
+      cachePath,
+      notifyDone: true,
+      suppressInitial: false,
+    });
+
+    // 1. Session begins Cooking
+    writeSessionFile({
+      session_id: 'term-sess-1',
+      agent: 'opencode',
+      status: STATUS.COOKING,
+      title: 'Run migrations',
+      pid: deadPid,
+      updated_at: Date.now(),
+    }, sessionDir);
+
+    let sessions = readAllSessionsFromDir(sessionDir);
+    tracker.processSessions(sessions);
+
+    // 2. Session finishes Done, and process exits (PID becomes dead)
+    writeSessionFile({
+      session_id: 'term-sess-1',
+      agent: 'opencode',
+      status: STATUS.DONE,
+      title: 'Run migrations',
+      pid: deadPid,
+      updated_at: Date.now(),
+    }, sessionDir);
+
+    // Simulate extension lifecycle scan:
+    // Read sessions with dead PID detection: Done with dead PID is flagged terminated
+    const isPidAlive = (pid) => pid !== deadPid;
+    const scannedSessions = fs.readdirSync(sessionDir)
+      .filter(f => f.endsWith('.json') && !f.startsWith('.'))
+      .map(f => {
+        const fullPath = path.join(sessionDir, f);
+        const raw = JSON.parse(fs.readFileSync(fullPath, 'utf8'));
+        const hasPid = typeof raw.pid === 'number';
+        const alive = hasPid ? isPidAlive(raw.pid) : true;
+        let terminated = false;
+        if (hasPid && !alive) {
+          if (raw.status === STATUS.DONE || raw.status === STATUS.BURN) {
+            terminated = true;
+          }
+        }
+        return {
+          ...raw,
+          filePath: fullPath,
+          terminated,
+        };
+      });
+
+    assert.strictEqual(scannedSessions.length, 1);
+    assert.strictEqual(scannedSessions[0].terminated, true);
+
+    // Evaluate notification BEFORE file deletion
+    const events = tracker.processSessions(scannedSessions);
+    assert.strictEqual(events.length, 1, 'Terminated Done session must be evaluated and emit notification before deletion');
+    assert.strictEqual(events[0].session.session_id, 'term-sess-1');
+    assert.strictEqual(events[0].reason, 'done');
+
+    // Clean up terminated session files after evaluation
+    for (const s of scannedSessions) {
+      if (s.terminated && s.filePath) {
+        fs.unlinkSync(s.filePath);
+      }
+    }
+
+    // File must now be removed from disk
+    assert.strictEqual(fs.existsSync(path.join(sessionDir, 'term-sess-1.json')), false, 'Terminated session file must be cleaned up');
+
+    // Next scan: file is gone, so 0 duplicate notifications
+    const nextSessions = fs.readdirSync(sessionDir)
+      .filter(f => f.endsWith('.json') && !f.startsWith('.'))
+      .map(f => JSON.parse(fs.readFileSync(path.join(sessionDir, f), 'utf8')));
+    const nextEvents = tracker.processSessions(nextSessions);
+    assert.strictEqual(nextEvents.length, 0, 'No duplicate notifications on subsequent scan after file cleanup');
+
+    // 3. Repeat for Burn with dead PID: Cooking -> Burn -> notify -> clean up
+    writeSessionFile({
+      session_id: 'term-sess-2',
+      agent: 'opencode',
+      status: STATUS.COOKING,
+      pid: deadPid,
+      updated_at: Date.now(),
+    }, sessionDir);
+    let s2List = [{ session_id: 'term-sess-2', agent: 'opencode', status: STATUS.COOKING, pid: deadPid }];
+    tracker.processSessions(s2List);
+
+    writeSessionFile({
+      session_id: 'term-sess-2',
+      agent: 'opencode',
+      status: STATUS.BURN,
+      reason: 'Syntax error',
+      pid: deadPid,
+      updated_at: Date.now(),
+    }, sessionDir);
+
+    const burnScanned = [{
+      session_id: 'term-sess-2',
+      agent: 'opencode',
+      status: STATUS.BURN,
+      reason: 'Syntax error',
+      pid: deadPid,
+      filePath: path.join(sessionDir, 'term-sess-2.json'),
+      terminated: true,
+    }];
+
+    const burnEvents = tracker.processSessions(burnScanned);
+    assert.strictEqual(burnEvents.length, 1, 'Terminated Burn session must emit notification before deletion');
+    assert.strictEqual(burnEvents[0].reason, 'burn');
+
+    for (const s of burnScanned) {
+      if (s.terminated && s.filePath) {
+        fs.unlinkSync(s.filePath);
+      }
+    }
+    assert.strictEqual(fs.existsSync(path.join(sessionDir, 'term-sess-2.json')), false);
+
+    // 4. Cooking crash (PID dies during Cooking): must NOT infer Done or Burn
+    writeSessionFile({
+      session_id: 'term-sess-3',
+      agent: 'opencode',
+      status: STATUS.COOKING,
+      pid: deadPid,
+      updated_at: Date.now(),
+    }, sessionDir);
+
+    const crashedScanned = [{
+      session_id: 'term-sess-3',
+      agent: 'opencode',
+      status: STATUS.UNKNOWN, // Crash maps to Unknown
+      stale: true,
+      pid: deadPid,
+      filePath: path.join(sessionDir, 'term-sess-3.json'),
+      terminated: false, // Not cleanly terminated
+    }];
+
+    const crashEvents = tracker.processSessions(crashedScanned);
+    assert.strictEqual(crashEvents.length, 0, 'Process crash during cooking must never infer Done or Burn or notify');
+    assert.ok(fs.existsSync(path.join(sessionDir, 'term-sess-3.json')), 'Crashed session file must remain visible as unknown');
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+}
+
 function run() {
   testFilesystemNotificationFlow();
   testCliProcessExecution();
+  testTerminatedSessionNotificationEvaluationAndCleanup();
   console.log('All LetItCook notification integration tests passed.');
 }
 

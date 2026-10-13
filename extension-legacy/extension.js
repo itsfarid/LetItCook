@@ -80,6 +80,7 @@ class LetItCookButton extends PanelMenu.Button {
         this._debounceTimerId = null;
 
         this._notifyCacheFile = GLib.build_filenamev([GLib.get_user_state_dir(), 'letitcook', 'notify_cache.json']);
+        this._lastSavedCacheJson = null;
         this._notifyCache = this._loadNotifyCache();
         this._notifyDone = this._notifyCache._config && this._notifyCache._config.notifyDone === true;
         this._isFirstScan = true;
@@ -161,17 +162,15 @@ class LetItCookButton extends PanelMenu.Button {
                         }
 
                         let stale = false;
+                        let terminated = false;
                         const hasPid = pid !== null;
                         const isPidAlive = hasPid ? GLib.file_test(`/proc/${pid}`, GLib.FileTest.EXISTS) : true;
 
                         // Lifecycle check: terminated session removal
                         if (hasPid && !isPidAlive) {
                             if (status === STATUS.DONE || status === STATUS.BURN) {
-                                // Session completed/ended and process terminated -> remove state file and exclude
-                                try {
-                                    file.delete(null);
-                                } catch (e) {}
-                                continue;
+                                // Process terminated after reaching terminal state
+                                terminated = true;
                             } else if (status === STATUS.COOKING || status === STATUS.YOUR_TURN) {
                                 // Process died unexpectedly -> mark Unknown (crash)
                                 stale = true;
@@ -198,6 +197,7 @@ class LetItCookButton extends PanelMenu.Button {
                             stale,
                             confidence,
                             filePath,
+                            terminated,
                         });
                     }
                 } catch (e) {
@@ -213,6 +213,7 @@ class LetItCookButton extends PanelMenu.Button {
                         stale: true,
                         confidence: 'low',
                         filePath,
+                        terminated: false,
                     });
                 }
             }
@@ -233,13 +234,23 @@ class LetItCookButton extends PanelMenu.Button {
 
     _update() {
         const sessions = this._readSessions();
-        this._currentSessions = sessions;
+        this._currentSessions = sessions.filter(s => !s.terminated);
         this._checkNotifications(sessions);
+
+        // Clean up terminated session files after notification evaluation
+        for (const s of sessions) {
+            if (s.terminated && s.filePath) {
+                try {
+                    const file = Gio.File.new_for_path(s.filePath);
+                    file.delete(null);
+                } catch (e) {}
+            }
+        }
 
         let dominant = STATUS.UNKNOWN;
         let maxPriority = 0;
 
-        for (const s of sessions) {
+        for (const s of this._currentSessions) {
             const meta = STATUS_META[s.status] || STATUS_META[STATUS.UNKNOWN];
             if (meta.priority > maxPriority) {
                 maxPriority = meta.priority;
@@ -255,7 +266,7 @@ class LetItCookButton extends PanelMenu.Button {
         }
         this._dot.add_style_class_name(`letitcook-dot-${dominant}`);
 
-        if (sessions.length === 0) {
+        if (this._currentSessions.length === 0) {
             this._label.text = 'LetItCook';
         } else {
             const meta = STATUS_META[dominant] || STATUS_META[STATUS.UNKNOWN];
@@ -279,21 +290,29 @@ class LetItCookButton extends PanelMenu.Button {
                         if (!parsed.sessions || typeof parsed.sessions !== 'object') {
                             parsed.sessions = {};
                         }
+                        this._lastSavedCacheJson = JSON.stringify(parsed);
                         return parsed;
                     }
                 }
             }
         } catch (e) {}
-        return { _config: { notifyDone: false }, sessions: {} };
+        const fallback = { _config: { notifyDone: false }, sessions: {} };
+        this._lastSavedCacheJson = JSON.stringify(fallback);
+        return fallback;
     }
 
-    _saveNotifyCache() {
+    _saveNotifyCache(force = false) {
         try {
             if (!this._notifyCache._config) this._notifyCache._config = {};
             this._notifyCache._config.notifyDone = this._notifyDone;
+            const serialized = JSON.stringify(this._notifyCache);
+            if (!force && serialized === this._lastSavedCacheJson) {
+                return;
+            }
             const file = Gio.File.new_for_path(this._notifyCacheFile);
-            const bytes = new TextEncoder().encode(JSON.stringify(this._notifyCache));
+            const bytes = new TextEncoder().encode(serialized);
             file.replace_contents(bytes, null, false, Gio.FileCreateFlags.REPLACE_DESTINATION, null);
+            this._lastSavedCacheJson = serialized;
         } catch (e) {}
     }
 
@@ -359,11 +378,13 @@ class LetItCookButton extends PanelMenu.Button {
                 }
             } else {
                 const currentNotified = (s.status === STATUS.COOKING) ? null : (cached ? cached.notifiedStatus : null);
-                this._notifyCache.sessions[sid] = {
-                    lastStatus: s.status,
-                    notifiedStatus: currentNotified,
-                    notifiedAt: cached ? cached.notifiedAt : null,
-                };
+                if (!cached || cached.lastStatus !== s.status || cached.notifiedStatus !== currentNotified) {
+                    this._notifyCache.sessions[sid] = {
+                        lastStatus: s.status,
+                        notifiedStatus: currentNotified,
+                        notifiedAt: cached ? cached.notifiedAt : null,
+                    };
+                }
             }
         }
 
@@ -449,7 +470,7 @@ class LetItCookButton extends PanelMenu.Button {
         const doneNotifyItem = new PopupMenu.PopupSwitchMenuItem('Notify on Done', this._notifyDone);
         doneNotifyItem.connect('toggled', (item, state) => {
             this._notifyDone = state;
-            this._saveNotifyCache();
+            this._saveNotifyCache(true);
         });
         this.menu.addMenuItem(doneNotifyItem);
 
