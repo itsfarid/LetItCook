@@ -83,6 +83,11 @@ class LetItCookButton extends PanelMenu.Button {
         this._currentAggregate = STATUS.UNKNOWN;
         this._debounceTimerId = null;
 
+        this._notifyCacheFile = GLib.build_filenamev([GLib.get_user_state_dir(), 'letitcook', 'notify_cache.json']);
+        this._notifyCache = this._loadNotifyCache();
+        this._notifyDone = this._notifyCache._config && this._notifyCache._config.notifyDone === true;
+        this._isFirstScan = true;
+
         // Lazy menu construction: only build actors when menu opens
         this._menuOpenId = this.menu.connect('open-state-changed', (menu, isOpen) => {
             if (isOpen) {
@@ -195,6 +200,7 @@ class LetItCookButton extends PanelMenu.Button {
                             pid,
                             updated_at: updatedAt,
                             stale,
+                            confidence,
                             filePath,
                         });
                     }
@@ -232,6 +238,7 @@ class LetItCookButton extends PanelMenu.Button {
     _update() {
         const sessions = this._readSessions();
         this._currentSessions = sessions;
+        this._checkNotifications(sessions);
 
         let dominant = STATUS.UNKNOWN;
         let maxPriority = 0;
@@ -263,6 +270,119 @@ class LetItCookButton extends PanelMenu.Button {
         if (this.menu && this.menu.isOpen) {
             this._rebuildMenu();
         }
+    }
+
+    _loadNotifyCache() {
+        try {
+            const file = Gio.File.new_for_path(this._notifyCacheFile);
+            if (file.query_exists(null)) {
+                const [ok, contents] = file.load_contents(null);
+                if (ok) {
+                    const parsed = JSON.parse(new TextDecoder().decode(contents));
+                    if (parsed && typeof parsed === 'object') {
+                        if (!parsed.sessions || typeof parsed.sessions !== 'object') {
+                            parsed.sessions = {};
+                        }
+                        return parsed;
+                    }
+                }
+            }
+        } catch (e) {}
+        return { _config: { notifyDone: false }, sessions: {} };
+    }
+
+    _saveNotifyCache() {
+        try {
+            if (!this._notifyCache._config) this._notifyCache._config = {};
+            this._notifyCache._config.notifyDone = this._notifyDone;
+            const file = Gio.File.new_for_path(this._notifyCacheFile);
+            const bytes = new TextEncoder().encode(JSON.stringify(this._notifyCache));
+            file.replace_contents(bytes, null, false, Gio.FileCreateFlags.REPLACE_DESTINATION, null);
+        } catch (e) {}
+    }
+
+    _checkNotifications(sessions) {
+        if (!this._notifyCache.sessions) {
+            this._notifyCache.sessions = {};
+        }
+
+        const activeIds = new Set();
+
+        for (const s of sessions) {
+            if (!s || !s.session_id) continue;
+            const sid = s.session_id;
+            activeIds.add(sid);
+
+            const cached = this._notifyCache.sessions[sid];
+
+            if (this._isFirstScan) {
+                if (!cached) {
+                    this._notifyCache.sessions[sid] = {
+                        lastStatus: s.status,
+                        notifiedStatus: null,
+                    };
+                }
+                continue;
+            }
+
+            const prevStatus = cached ? cached.lastStatus : null;
+
+            let shouldAlert = false;
+            if (s.status !== prevStatus && !s.stale && s.confidence !== 'low') {
+                if (s.status === STATUS.YOUR_TURN) {
+                    shouldAlert = true;
+                } else if (s.status === STATUS.BURN) {
+                    shouldAlert = true;
+                } else if (s.status === STATUS.DONE && this._notifyDone && prevStatus === STATUS.COOKING) {
+                    shouldAlert = true;
+                }
+            }
+
+            if (shouldAlert) {
+                if (!cached || cached.notifiedStatus !== s.status) {
+                    const title = `LetItCook: ${s.agent || 'Agent'}`;
+                    const subject = s.title || shortCwd(s.cwd);
+                    let body = '';
+                    if (s.status === STATUS.YOUR_TURN) {
+                        body = s.reason ? `Your Turn (${s.reason}) • ${subject}` : `Your Turn • ${subject}`;
+                    } else if (s.status === STATUS.BURN) {
+                        body = s.reason ? `Burn: ${s.reason} • ${subject}` : `Burn • ${subject}`;
+                    } else if (s.status === STATUS.DONE) {
+                        body = `Done • ${subject}`;
+                    }
+
+                    try {
+                        Main.notify(title, body);
+                    } catch (e) {}
+
+                    this._notifyCache.sessions[sid] = {
+                        lastStatus: s.status,
+                        notifiedStatus: s.status,
+                        notifiedAt: Date.now(),
+                    };
+                }
+            } else {
+                const currentNotified = (s.status === STATUS.COOKING) ? null : (cached ? cached.notifiedStatus : null);
+                this._notifyCache.sessions[sid] = {
+                    lastStatus: s.status,
+                    notifiedStatus: currentNotified,
+                    notifiedAt: cached ? cached.notifiedAt : null,
+                };
+            }
+        }
+
+        if (this._isFirstScan) {
+            this._isFirstScan = false;
+        }
+
+        // ponytail: prune missing sessions immediately, upgrade to ttl cache if ghost sessions need tracking
+        for (const sid of Object.keys(this._notifyCache.sessions)) {
+            if (!activeIds.has(sid)) {
+                delete this._notifyCache.sessions[sid];
+            }
+        }
+
+        this._saveNotifyCache();
     }
 
     _rebuildMenu() {
@@ -329,6 +449,13 @@ class LetItCookButton extends PanelMenu.Button {
         }
 
         this.menu.addMenuItem(new PopupMenu.PopupSeparatorMenuItem());
+
+        const doneNotifyItem = new PopupMenu.PopupSwitchMenuItem('Notify on Done', this._notifyDone);
+        doneNotifyItem.connect('toggled', (item, state) => {
+            this._notifyDone = state;
+            this._saveNotifyCache();
+        });
+        this.menu.addMenuItem(doneNotifyItem);
 
         const clearItem = new PopupMenu.PopupMenuItem('Clear Inactive Sessions');
         clearItem.connect('activate', () => {

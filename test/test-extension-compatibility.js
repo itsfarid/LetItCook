@@ -1,6 +1,7 @@
 import assert from 'node:assert';
 import fs from 'node:fs';
 import path from 'node:path';
+import os from 'node:os';
 import { execFileSync } from 'node:child_process';
 import { STATUS, STATUS_META } from '../src/core/status.js';
 
@@ -286,6 +287,48 @@ function testStylesheetSingleDotDesign() {
   assert.strictEqual(/background/.test(labelBlock), false, 'Label must not have background');
 }
 
+function testNotificationIntegrationParity() {
+  const targets = ['extension/extension.js', 'extension-legacy/extension.js'];
+
+  for (const target of targets) {
+    const code = fs.readFileSync(path.resolve(target), 'utf8');
+
+    assert.ok(code.includes('_checkNotifications(sessions)'), `${target} must define _checkNotifications`);
+    assert.ok(code.includes('_loadNotifyCache()'), `${target} must define _loadNotifyCache`);
+    assert.ok(code.includes('_saveNotifyCache()'), `${target} must define _saveNotifyCache`);
+    assert.ok(code.includes('Main.notify('), `${target} must call Main.notify`);
+    assert.ok(code.includes('PopupSwitchMenuItem'), `${target} must include PopupSwitchMenuItem for Done toggle`);
+    assert.ok(code.includes("'Notify on Done'"), `${target} must include 'Notify on Done' menu toggle`);
+    assert.ok(code.includes('notify_cache.json'), `${target} must use notify_cache.json`);
+  }
+}
+
+function testPackagingBothTargets() {
+  const tmpOut = fs.mkdtempSync(path.join(os.tmpdir(), 'letitcook-pack-test-'));
+  try {
+    const modernZip = path.join(tmpOut, 'modern');
+    const legacyZip = path.join(tmpOut, 'legacy');
+    fs.mkdirSync(modernZip);
+    fs.mkdirSync(legacyZip);
+
+    try {
+      execFileSync('gnome-extensions', ['pack', '--force', `--out-dir=${modernZip}`, 'extension'], { stdio: 'ignore' });
+      const modernFiles = fs.readdirSync(modernZip);
+      assert.ok(modernFiles.some(f => f.endsWith('.shell-extension.zip')), 'Modern extension must pack into zip bundle');
+
+      execFileSync('gnome-extensions', ['pack', '--force', `--out-dir=${legacyZip}`, 'extension-legacy'], { stdio: 'ignore' });
+      const legacyFiles = fs.readdirSync(legacyZip);
+      assert.ok(legacyFiles.some(f => f.endsWith('.shell-extension.zip')), 'Legacy extension must pack into zip bundle');
+    } catch (e) {
+      // If gnome-extensions is not in environment, skip packaging check gracefully
+      if (e.code === 'ENOENT') return;
+      throw e;
+    }
+  } finally {
+    fs.rmSync(tmpOut, { recursive: true, force: true });
+  }
+}
+
 function run() {
   testModernMetadataCompatibility();
   testLegacyMetadataCompatibility();
@@ -297,6 +340,8 @@ function run() {
   testDropdownMenuRetainsEmojis();
   testPanelActorHierarchyAndLifecycle();
   testStylesheetSingleDotDesign();
+  testNotificationIntegrationParity();
+  testPackagingBothTargets();
   console.log('All LetItCook GNOME extension compatibility tests passed.');
 }
 

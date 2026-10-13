@@ -33,9 +33,10 @@ See `AGENTS.md` §28 for per-state reliability notes.
 ## Commands
 
 ```bash
-npm test          # all suites (state, adapters, integration, plugin, performance, lifecycle)
+npm test          # all suites (state, adapters, integration, plugin, performance, lifecycle, notifications)
 npm run sync      # one-shot: sync poll-based adapters (Copilot) into the state dir
 node src/sync.js --watch [ms]   # repeat sync every ms (default 5000)
+npm run notify    # one-shot: inspect notification transitions (GNOME extension is primary owner)
 
 # reload the GNOME extension after changing extension/
 # For GNOME 45+ (ESM):
@@ -47,6 +48,18 @@ cp extension-legacy/* ~/.local/share/gnome-shell/extensions/letitcook@letitcook.
 # then: Alt+F2 → r (X11) or log out/in (Wayland), or:
 gnome-extensions disable letitcook@letitcook.local && gnome-extensions enable letitcook@letitcook.local
 ```
+
+## Notifications
+
+Native GNOME desktop notifications are owned automatically by the GNOME extension:
+- `Your Turn`: Notified automatically when agent requires developer attention.
+- `Burn`: Notified automatically on errors or unrecoverable failures.
+- `Done`: Opt-in via the "Notify on Done" toggle in the panel dropdown menu.
+- `Cooking` and `Unknown`: Suppressed to prevent noise.
+
+Notification state is tracked in `~/.local/state/letitcook/notify_cache.json` to prevent duplicates across file writes, poll intervals, and extension reloads.
+
+Note: Automatic desktop dispatch is handled exclusively by the GNOME Shell extension. CLI `--dispatch` is unsupported to eliminate race conditions and duplicate alerts. `npm run notify` provides read-only inspection, and `node src/notify.js --test` allows manual test alerts.
 
 For Copilot sessions to appear in the panel, `src/sync.js --watch` (or a
 systemd user timer running `npm run sync`) must be running — Copilot has no
