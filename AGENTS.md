@@ -96,6 +96,30 @@ The core question the project should answer is:
 
 ### Personal First
 
+### Security First by Design
+
+Security is a fundamental requirement, not an afterthought.
+The application must:
+- validate all local input and sanitize user-provided paths;
+- avoid shell injection and unsafe command construction;
+- minimize filesystem permissions (run with least privilege);
+- bind local services to localhost if network access is needed;
+- protect authentication tokens and sensitive state;
+- avoid executing arbitrary agent-provided content;
+- validate agent state format before processing;
+- treat all external inputs as untrusted until verified.
+
+### Software Engineering Best Practices
+
+Always adhere to standard software engineering best practices:
+- DRY (Don't Repeat Yourself) before abstraction;
+- SOLID principles when multiple implementations exist;
+- clean, readable, maintainable code;
+- comprehensive error handling with meaningful messages;
+- logging for debugging without exposing sensitive data;
+- idempotent operations where possible;
+- proper resource cleanup (file handles, signals).
+
 The first goal is to improve the developer's own workflow.
 
 Do not prematurely optimize for:
@@ -314,7 +338,18 @@ No agent conversation content should leave the machine.
 
 ## 11. Performance
 
-LetItCook should remain lightweight enough for older hardware.
+LetItCook should remain lightweight enough for older hardware and older GNOME versions.
+
+**GNOME Shell Extension manifest:** legacy target GNOME 42–44 (`extension-legacy/`), ESM target GNOME 45–47 (`extension/`). Verify compatibility with both legacy and ESM targets; never claim untested versions are supported.
+
+Compatibility with older GNOME versions must be maintained through:
+
+- CSS-first styling (avoid JavaScript-dependent UI updates);
+- Minimal async/await patterns that cause main thread blocking;
+- Lightweight JSON parsing for any data;
+- Using standard shell utilities instead of complex scripting languages.
+
+The extension must function correctly on systems with limited resources (older CPUs, low RAM, limited storage).
 
 Avoid:
 
@@ -598,6 +633,25 @@ At minimum, test:
 
 Tests should verify observable behavior rather than implementation details wherever practical.
 
+### Testing Requirements
+
+Unit tests and integration tests must be written and passing before any commit.
+
+Code/behavior changes require relevant unit and integration tests to pass. Documentation-only changes may skip code tests when genuinely irrelevant, but must validate links, formatting, examples, or documentation consistency as appropriate. Never claim skipped tests passed.
+
+**Unit tests** should cover:
+- individual state detection functions;
+- edge cases in parsing logic;
+- error handling for malformed inputs.
+
+**Integration tests** should cover:
+- complete agent-to-GNOME-UI workflow;
+- status transitions under normal operation;
+- agent session lifecycle;
+- edge cases that involve multiple components interacting.
+
+The test suite must pass before every commit.
+
 ---
 
 ## 20. Error Handling
@@ -665,14 +719,34 @@ Prefer standard GNOME/JavaScript APIs and lightweight local tooling where practi
 
 ## 23. Git Workflow
 
+Always use best practice naming for branches and commit messages.
+
+**Branch naming conventions:**
+- Use descriptive names in lowercase, hyphen-separated format
+- Use existing agreed prefixes: `feat`, `fix`, `test`, `refactor`, `docs`, `chore`
+- Branch names indicate feature or fix scope
+- Examples: `feat/opencode-adapter`, `fix/status-detection`, `test/unit-status`, `refactor/ui-css`, `docs-api`, `chore/test-setup`
+
+**Commit naming conventions:**
+- Conventional Commit format: `type(scope): message`
+- Type can be: `feat`, `fix`, `test`, `docs`, `refactor`, `chore`, `style`, `perf`, `revert`
+- Scope can be omitted, typically indicates affected component (agent, ui, security, testing, etc.)
+- Clear, focused description of the change
+- Examples:
+  - `feat(agent): add OpenCode status adapter detection`
+  - `fix(ui): handle Your Turn indicator state`
+  - `test(agent): cover Burn state detection edge case`
+  - `docs(api): document adapter lifecycle`
+  - `refactor(sync): reduce session polling frequency`
+
 Keep commits focused and understandable.
 
 Prefer commit messages such as:
 
-- `feat: add OpenCode status adapter`
-- `fix: handle stale agent sessions`
-- `feat: add Your Turn indicator`
-- `test: cover Burn state detection`
+- `feat(agent): add OpenCode status adapter`
+- `fix(agent): handle stale agent sessions`
+- `feat(ui): add Your Turn indicator`
+- `test(agent): cover Burn state detection`
 
 Avoid mixing unrelated changes into one commit.
 
