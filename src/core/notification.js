@@ -112,6 +112,7 @@ export class NotificationTracker {
       _config: { notifyDone: this.notifyDone },
       sessions: {},
     };
+    this._lastSavedJson = null;
     if (this.cachePath) {
       this.load(options);
     }
@@ -134,26 +135,35 @@ export class NotificationTracker {
     } catch {
       this._cache = { _config: { notifyDone: this.notifyDone }, sessions: {} };
     }
+    this._cache._config = { notifyDone: this.notifyDone };
+    this._lastSavedJson = JSON.stringify(this._cache, null, 2);
   }
 
-  save() {
-    if (!this.cachePath) return;
+  save(force = false) {
+    if (!this.cachePath) return false;
     let tmpPath = null;
     try {
       this._cache._config = { notifyDone: this.notifyDone };
+      const serialized = JSON.stringify(this._cache, null, 2);
+      if (!force && serialized === this._lastSavedJson) {
+        return false;
+      }
       const dir = path.dirname(this.cachePath);
       if (!fs.existsSync(dir)) {
         fs.mkdirSync(dir, { recursive: true });
       }
       tmpPath = path.join(dir, `.notify_cache.tmp.${process.pid}.${Date.now()}`);
-      fs.writeFileSync(tmpPath, JSON.stringify(this._cache, null, 2), 'utf8');
+      fs.writeFileSync(tmpPath, serialized, 'utf8');
       fs.renameSync(tmpPath, this.cachePath);
+      this._lastSavedJson = serialized;
+      return true;
     } catch {
       if (tmpPath) {
         try {
           if (fs.existsSync(tmpPath)) fs.unlinkSync(tmpPath);
         } catch {}
       }
+      return false;
     }
   }
 
@@ -173,7 +183,6 @@ export class NotificationTracker {
           this._cache.sessions[sid] = {
             lastStatus: session.status,
             notifiedStatus: null,
-            updatedAt: session.updated_at || Date.now(),
           };
         }
         continue;
@@ -194,17 +203,17 @@ export class NotificationTracker {
             lastStatus: session.status,
             notifiedStatus: session.status,
             notifiedAt: Date.now(),
-            updatedAt: session.updated_at || Date.now(),
           };
         }
       } else {
         const currentNotified = (session.status === STATUS.COOKING) ? null : (cached ? cached.notifiedStatus : null);
-        this._cache.sessions[sid] = {
-          lastStatus: session.status,
-          notifiedStatus: currentNotified,
-          notifiedAt: cached ? cached.notifiedAt : null,
-          updatedAt: session.updated_at || Date.now(),
-        };
+        if (!cached || cached.lastStatus !== session.status || cached.notifiedStatus !== currentNotified) {
+          this._cache.sessions[sid] = {
+            lastStatus: session.status,
+            notifiedStatus: currentNotified,
+            notifiedAt: cached ? cached.notifiedAt : null,
+          };
+        }
       }
     }
 
