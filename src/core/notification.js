@@ -237,12 +237,16 @@ export class NotificationTracker {
     try {
       this._cache._config = { notifyDone: this.notifyDone };
       const serialized = JSON.stringify(this._cache, null, 2);
-      if (!force && serialized === this._lastSavedJson) {
+      const dir = path.dirname(this.cachePath);
+      const unchanged = !force && serialized === this._lastSavedJson;
+      if (unchanged && !statOrNull(this.cachePath)) {
         return false;
       }
-      const dir = path.dirname(this.cachePath);
       ensurePrivateCacheDirectory(dir);
       const existingIdentity = prepareExistingCache(this.cachePath);
+      if (unchanged) {
+        return false;
+      }
 
       for (let attempt = 0; attempt < 5 && fd === null; attempt++) {
         tmpPath = path.join(dir, `.notify_cache.tmp.${process.pid}.${randomBytes(8).toString('hex')}`);

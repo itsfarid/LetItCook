@@ -238,6 +238,15 @@ function testPrivateAtomicCachePersistence() {
     assert.strictEqual(JSON.parse(fs.readFileSync(cachePath, 'utf8')).sessions.secure.lastStatus, STATUS.COOKING);
     assert.deepStrictEqual(fs.readdirSync(cacheDir), ['notify_cache.json'], 'successful save leaves no temp file');
 
+    // An unchanged writable save still tightens pre-existing broad permissions.
+    const unchangedContents = fs.readFileSync(cachePath, 'utf8');
+    fs.chmodSync(cacheDir, 0o755);
+    fs.chmodSync(cachePath, 0o644);
+    assert.strictEqual(tracker.save(), false, 'unchanged cache is not rewritten');
+    assert.strictEqual(mode(cacheDir), 0o700, 'no-op save hardens existing cache directory');
+    assert.strictEqual(mode(cachePath), 0o600, 'no-op save hardens existing cache file');
+    assert.strictEqual(fs.readFileSync(cachePath, 'utf8'), unchangedContents, 'no-op hardening preserves cache contents');
+
     // A failed rename leaves the old cache contents intact and removes our private temp.
     const oldContents = fs.readFileSync(cachePath, 'utf8');
     const originalRename = fs.renameSync;
