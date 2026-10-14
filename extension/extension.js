@@ -49,13 +49,87 @@ function shortCwd(cwd) {
     return parts.slice(-2).join('/');
 }
 
+// Restrict a LetItCook-owned directory to owner-only (0700), querying and
+// setting attributes with NOFOLLOW_SYMLINKS so a link is never chmod-ed by path.
+function ensurePrivateDir(path) {
+    try {
+        const dirFile = Gio.File.new_for_path(path);
+        const flags = Gio.FileQueryInfoFlags.NOFOLLOW_SYMLINKS;
+        const attrs = 'standard::type,unix::mode,owner::user';
+        const info = dirFile.query_info(attrs, flags, null);
+        if (info.get_file_type() !== Gio.FileType.DIRECTORY ||
+            !info.has_attribute('unix::mode') ||
+            !info.has_attribute('owner::user') ||
+            info.get_attribute_string('owner::user') !== GLib.get_user_name())
+            return;
+        if ((info.get_attribute_uint32('unix::mode') & 0o777) === 0o700)
+            return;
+        if (!dirFile.set_attribute_uint32('unix::mode', 0o700, flags, null)) {
+            console.error(`[LetItCook] Could not restrict permissions on ${path}`);
+            return;
+        }
+        const secured = dirFile.query_info(attrs, flags, null);
+        if (secured.get_file_type() !== Gio.FileType.DIRECTORY ||
+            secured.get_attribute_string('owner::user') !== GLib.get_user_name() ||
+            (secured.get_attribute_uint32('unix::mode') & 0o777) !== 0o700)
+            console.error(`[LetItCook] Could not verify private permissions on ${path}`);
+    } catch (e) {
+        console.error(`[LetItCook] Could not restrict permissions on ${path}: ${e}`);
+    }
+}
+
+function ensurePrivateNotifyCacheFile(path) {
+    try {
+        if (GLib.file_test(path, GLib.FileTest.IS_SYMLINK))
+            return false;
+        if (!GLib.file_test(path, GLib.FileTest.EXISTS))
+            return true;
+
+        const file = Gio.File.new_for_path(path);
+        const attributes = 'standard::type,unix::mode,unix::nlink,owner::user';
+        const info = file.query_info(attributes, Gio.FileQueryInfoFlags.NOFOLLOW_SYMLINKS, null);
+        if (info.get_file_type() !== Gio.FileType.REGULAR ||
+            !info.has_attribute('unix::mode') ||
+            !info.has_attribute('unix::nlink') ||
+            !info.has_attribute('owner::user') ||
+            info.get_attribute_uint32('unix::nlink') !== 1 ||
+            info.get_attribute_string('owner::user') !== GLib.get_user_name())
+            return false;
+
+        if ((info.get_attribute_uint32('unix::mode') & 0o777) === 0o600)
+            return true;
+
+        // Replacement is atomic and does not follow a symlink at the target path.
+        const [ok, contents] = file.load_contents(null);
+        if (!ok) return false;
+        file.replace_contents(contents, null, false,
+            Gio.FileCreateFlags.REPLACE_DESTINATION | Gio.FileCreateFlags.PRIVATE, null);
+
+        const secured = file.query_info(attributes, Gio.FileQueryInfoFlags.NOFOLLOW_SYMLINKS, null);
+        return secured.get_file_type() === Gio.FileType.REGULAR &&
+            secured.has_attribute('unix::mode') &&
+            secured.has_attribute('unix::nlink') &&
+            secured.has_attribute('owner::user') &&
+            secured.get_attribute_uint32('unix::nlink') === 1 &&
+            secured.get_attribute_string('owner::user') === GLib.get_user_name() &&
+            (secured.get_attribute_uint32('unix::mode') & 0o777) === 0o600;
+    } catch (e) {
+        console.error(`[LetItCook] Could not secure notification cache ${path}: ${e}`);
+        return false;
+    }
+}
+
 const LetItCookButton = GObject.registerClass(
 class LetItCookButton extends PanelMenu.Button {
     _init() {
         super._init(0.0, 'LetItCook', false);
 
         this._stateDir = GLib.build_filenamev([GLib.get_user_state_dir(), 'letitcook', 'sessions']);
-        GLib.mkdir_with_parents(this._stateDir, 0o755);
+        GLib.mkdir_with_parents(this._stateDir, 0o700);
+        // Correct pre-existing directories created with broader permissions.
+        // Only LetItCook's own two directories are touched, never their parents.
+        ensurePrivateDir(GLib.path_get_dirname(this._stateDir));
+        ensurePrivateDir(this._stateDir);
 
         this._container = new St.BoxLayout({
             style_class: 'letitcook-panel-box',
@@ -136,8 +210,9 @@ class LetItCookButton extends PanelMenu.Button {
         const sessions = [];
         const dirFile = Gio.File.new_for_path(this._stateDir);
 
+        let enumerator = null;
         try {
-            const enumerator = dirFile.enumerate_children('standard::name', Gio.FileQueryInfoFlags.NONE, null);
+            enumerator = dirFile.enumerate_children('standard::name', Gio.FileQueryInfoFlags.NONE, null);
             let info;
             const now = Date.now();
 
@@ -223,6 +298,14 @@ class LetItCookButton extends PanelMenu.Button {
             }
         } catch (e) {
             console.error(`[LetItCook] Error reading sessions: ${e}`);
+        } finally {
+            if (enumerator) {
+                try {
+                    enumerator.close(null);
+                } catch (e) {
+                    console.error(`[LetItCook] Error closing enumerator: ${e}`);
+                }
+            }
         }
 
         // ponytail: sort by status priority desc then recency, upgrade when custom sort needed
@@ -285,6 +368,9 @@ class LetItCookButton extends PanelMenu.Button {
 
     _loadNotifyCache() {
         try {
+            if (!ensurePrivateNotifyCacheFile(this._notifyCacheFile)) {
+                return { _config: { notifyDone: false }, sessions: {} };
+            }
             const file = Gio.File.new_for_path(this._notifyCacheFile);
             if (file.query_exists(null)) {
                 const [ok, contents] = file.load_contents(null);
@@ -307,6 +393,7 @@ class LetItCookButton extends PanelMenu.Button {
 
     _saveNotifyCache(force = false) {
         try {
+            if (!ensurePrivateNotifyCacheFile(this._notifyCacheFile)) return;
             if (!this._notifyCache._config) this._notifyCache._config = {};
             this._notifyCache._config.notifyDone = this._notifyDone;
             const serialized = JSON.stringify(this._notifyCache);
@@ -315,9 +402,14 @@ class LetItCookButton extends PanelMenu.Button {
             }
             const file = Gio.File.new_for_path(this._notifyCacheFile);
             const bytes = new TextEncoder().encode(serialized);
-            file.replace_contents(bytes, null, false, Gio.FileCreateFlags.REPLACE_DESTINATION, null);
+            file.replace_contents(bytes, null, false,
+                Gio.FileCreateFlags.REPLACE_DESTINATION | Gio.FileCreateFlags.PRIVATE, null);
             this._lastSavedCacheJson = serialized;
-        } catch (e) {}
+            if (!ensurePrivateNotifyCacheFile(this._notifyCacheFile))
+                console.error(`[LetItCook] Notification cache did not retain private permissions`);
+        } catch (e) {
+            console.error(`[LetItCook] Could not save notification cache: ${e}`);
+        }
     }
 
     _checkNotifications(sessions) {

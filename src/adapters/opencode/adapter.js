@@ -3,6 +3,7 @@ import path from 'node:path';
 import os from 'node:os';
 import { STATUS, normalizeSession } from '../../core/status.js';
 import { BaseAdapter } from '../base.js';
+import { isValidSessionId, assertValidSessionId, ensurePrivateDir } from '../../core/fs-safe.js';
 
 let writeCounter = 0;
 
@@ -208,11 +209,12 @@ export function mapToolHook(stage, input, previousState = null) {
 }
 
 export function writeSessionFile(session, baseDir) {
+  const sessionId = assertValidSessionId(session && session.session_id);
   const targetDir = getSessionDir(baseDir);
-  fs.mkdirSync(targetDir, { recursive: true });
+  ensurePrivateDir(targetDir);
 
-  const filePath = path.join(targetDir, `${session.session_id}.json`);
-  const tmpPath = path.join(targetDir, `.${session.session_id}.${process.pid}.${Date.now()}.tmp`);
+  const filePath = path.join(targetDir, `${sessionId}.json`);
+  const tmpPath = path.join(targetDir, `.${sessionId}.${process.pid}.${Date.now()}.tmp`);
 
   // ponytail: atomic rename on POSIX, upgrade to lockfile if cross-device issues occur
   fs.writeFileSync(tmpPath, JSON.stringify(session, null, 2), 'utf8');
@@ -221,6 +223,7 @@ export function writeSessionFile(session, baseDir) {
 }
 
 export function deleteSessionFile(sessionId, baseDir) {
+  if (!isValidSessionId(sessionId)) return;
   const targetDir = getSessionDir(baseDir);
   const filePath = path.join(targetDir, `${sessionId}.json`);
   try {
@@ -242,6 +245,9 @@ export function readAllSessionsFromDir(baseDir, options = {}) {
     try {
       const raw = fs.readFileSync(fullPath, 'utf8');
       const parsed = JSON.parse(raw);
+      if (!parsed || typeof parsed !== 'object' || !isValidSessionId(parsed.session_id)) {
+        throw new Error('invalid session id in state file');
+      }
       const normalized = normalizeSession(parsed, options);
       if (normalized.terminated) {
         deleteSessionFile(normalized.session_id, baseDir);
@@ -249,8 +255,10 @@ export function readAllSessionsFromDir(baseDir, options = {}) {
         sessions.push(normalized);
       }
     } catch {
+      const stem = file.replace(/\.json$/, '');
+      if (!isValidSessionId(stem)) continue;
       const fallback = normalizeSession({
-        session_id: file.replace(/\.json$/, ''),
+        session_id: stem,
         agent: 'opencode',
         status: STATUS.UNKNOWN,
         reason: 'corrupted state file',
@@ -288,6 +296,7 @@ export class OpenCodeAdapter extends BaseAdapter {
   }
 
   getSessionState(sessionId, options = {}) {
+    if (!isValidSessionId(sessionId)) return null;
     const dir = options.baseDir || getSessionDir();
     const filePath = path.join(dir, `${sessionId}.json`);
     if (!fs.existsSync(filePath)) return null;
