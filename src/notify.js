@@ -35,13 +35,16 @@ export function runNotify(options = {}) {
 
   const sessionDir = options.sessionDir || getSessionDir();
   const cachePath = options.cachePath || getCachePath();
-  const notifyDone = options.notifyDone === true;
-
+  // Inspection is strictly read-only: the cache is loaded but never written, so
+  // pending notifications stay pending for the GNOME extension and the persisted
+  // notifyDone preference is untouched. `notifyDone: true` is a one-off override.
   const tracker = new NotificationTracker({
     cachePath,
-    notifyDone,
-    suppressInitial: options.suppressInitial !== false,
+    notifyDone: options.notifyDone === true ? true : undefined,
+    suppressInitial: options.suppressInitial === true,
+    readOnly: true,
   });
+  const notifyDone = tracker.notifyDone;
 
   const sessions = readAllSessionsFromDir(sessionDir);
   const events = tracker.processSessions(sessions);
@@ -76,8 +79,8 @@ if (isDirectRun) {
 Note: GNOME Shell extension is the sole owner of automatic desktop notifications.
 
 Usage:
-  node src/notify.js                 Inspect notification state (one-shot, non-competing)
-  node src/notify.js --include-done  Include Done status transitions in inspection
+  node src/notify.js                 Inspect pending notifications (read-only, never writes the cache)
+  node src/notify.js --include-done  Include Done transitions in this inspection only (does not persist)
   node src/notify.js --test [status] Fire a manual test notification via notify-send
   node src/notify.js --watch [ms]    Optional inspection loop (prints transitions to stdout)
 
@@ -107,15 +110,23 @@ CLI automatic dispatch is unsupported to prevent duplicate alerts and race condi
     process.exit(0);
   }
 
-  const notifyDone = args.includes('--include-done');
+  const notifyDone = args.includes('--include-done') ? true : undefined;
 
   if (args.includes('--watch')) {
     const idx = args.indexOf('--watch');
     const intervalMs = Math.max(1000, parseInt(args[idx + 1] || '5000', 10) || 5000);
     console.error(`[letitcook-notify] Watching every ${intervalMs}ms (GNOME extension is primary owner)`);
+    const seen = new Set();
     const tick = () => {
       try {
-        const result = runNotify({ notifyDone, suppressInitial: false });
+        const result = runNotify({ notifyDone });
+        result.events = result.events.filter(e => {
+          const key = `${e.session_id}:${e.status}`;
+          if (seen.has(key)) return false;
+          seen.add(key);
+          return true;
+        });
+        result.eventsCount = result.events.length;
         if (result.eventsCount > 0) {
           console.log(JSON.stringify(result));
         }

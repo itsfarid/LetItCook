@@ -375,7 +375,39 @@ function testTerminalNotificationDeduplicationAndSuppression() {
   }
 }
 
+function testReadOnlyTracker() {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'letitcook-ro-unit-'));
+  const cachePath = path.join(tmpDir, 'notify_cache.json');
+  try {
+    // readOnly never creates a cache and still reports events
+    const ro = new NotificationTracker({ cachePath, suppressInitial: false, readOnly: true });
+    ro.processSessions([{ session_id: 'a', status: STATUS.COOKING }]);
+    const events = ro.processSessions([{ session_id: 'a', status: STATUS.BURN, agent: 'x' }]);
+    assert.strictEqual(events.length, 1);
+    ro.save();
+    assert.strictEqual(fs.existsSync(cachePath), false, 'readOnly tracker must not write');
+
+    // Writable tracker still persists (atomic write) with its config
+    const rw = new NotificationTracker({ cachePath, notifyDone: true, suppressInitial: false });
+    rw.processSessions([{ session_id: 'a', status: STATUS.COOKING }]);
+    const persisted = JSON.parse(fs.readFileSync(cachePath, 'utf8'));
+    assert.strictEqual(persisted._config.notifyDone, true);
+    assert.strictEqual(persisted.sessions.a.lastStatus, STATUS.COOKING);
+    assert.deepStrictEqual(fs.readdirSync(tmpDir), ['notify_cache.json']);
+
+    // readOnly with undefined notifyDone inherits persisted preference without altering it
+    const before = fs.readFileSync(cachePath, 'utf8');
+    const inherit = new NotificationTracker({ cachePath, readOnly: true, suppressInitial: false });
+    assert.strictEqual(inherit.notifyDone, true);
+    inherit.processSessions([{ session_id: 'a', status: STATUS.DONE }]);
+    assert.strictEqual(fs.readFileSync(cachePath, 'utf8'), before);
+ } finally {
+   fs.rmSync(tmpDir, { recursive: true, force: true });
+ }
+}
+
 function run() {
+  testReadOnlyTracker();
   testShortCwd();
   testSanitizeText();
   testShouldNotify();
