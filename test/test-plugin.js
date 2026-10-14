@@ -45,7 +45,7 @@ async function testPlugin() {
     sessions = readAllSessionsFromDir(tmpDir);
     assert.strictEqual(sessions[0].status, STATUS.COOKING);
 
-    // 4. Session idle -> Done
+    // 4. Session idle does not prove completion
     await pluginInstance.event({
       event: {
         type: 'session.idle',
@@ -53,7 +53,7 @@ async function testPlugin() {
       },
     });
     sessions = readAllSessionsFromDir(tmpDir);
-    assert.strictEqual(sessions[0].status, STATUS.DONE);
+    assert.strictEqual(sessions[0].status, STATUS.UNKNOWN);
 
     // 5. Session deleted -> File deleted
     await pluginInstance.event({

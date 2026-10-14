@@ -72,14 +72,14 @@ async function testFullOpenCodeLifecycle() {
     current = readAllSessionsFromDir(testDir);
     assert.strictEqual(aggregateState(current).status, STATUS.COOKING, 'Step 6 should be Cooking');
 
-    // Step 7: session.idle -> Done
+    // Step 7: session.idle does not prove successful completion
     state = mapOpenCodeEvent({
       type: 'session.idle',
       properties: { sessionID: 'e2e_ses_1' },
     }, state);
     writeSessionFile(state, testDir);
     current = readAllSessionsFromDir(testDir);
-    assert.strictEqual(aggregateState(current).status, STATUS.DONE, 'Step 7 should be Done');
+    assert.strictEqual(aggregateState(current).status, STATUS.UNKNOWN, 'Step 7 idle state should remain Unknown');
 
     // Step 8: Multi-session concurrency test
     // Add second session in cooking
@@ -161,4 +161,32 @@ async function testFullOpenCodeLifecycle() {
   }
 }
 
+function testOpenCodeIdleSignalsAreConservative() {
+  const cooking = { session_id: 'idle-test', status: STATUS.COOKING, agent: 'opencode' };
+  const waiting = { ...cooking, status: STATUS.YOUR_TURN };
+  const failed = { ...cooking, status: STATUS.BURN };
+
+  for (const previous of [null, cooking, waiting, failed]) {
+    const idle = mapOpenCodeEvent({
+      type: 'session.idle',
+      properties: { sessionID: 'idle-test' },
+    }, previous);
+    assert.strictEqual(idle.status, STATUS.UNKNOWN, 'session.idle never implies a user-facing state');
+  }
+
+  assert.strictEqual(mapOpenCodeEvent({
+    type: 'session.status', properties: { sessionID: 'idle-test', status: 'idle' },
+  }).status, STATUS.UNKNOWN, 'idle status without prior evidence is Unknown');
+  assert.strictEqual(mapOpenCodeEvent({
+    type: 'session.status', properties: { sessionID: 'idle-test', status: 'idle' },
+  }, cooking).status, STATUS.COOKING, 'idle status does not infer Done');
+  assert.strictEqual(mapOpenCodeEvent({
+    type: 'session.compacted', properties: { sessionID: 'idle-test' },
+  }, waiting).status, STATUS.YOUR_TURN, 'compaction preserves prior known state rather than claiming completion');
+  assert.strictEqual(mapOpenCodeEvent({
+    type: 'session.compacted', properties: { sessionID: 'idle-test' },
+  }).status, STATUS.UNKNOWN, 'compaction without prior state is Unknown');
+}
+
+testOpenCodeIdleSignalsAreConservative();
 testFullOpenCodeLifecycle();

@@ -113,9 +113,13 @@ export function mapOpenCodeEvent(event, previousState = null) {
       reason = `error:${msg}`;
       break;
     }
-    case 'session.idle':
+    case 'session.idle': {
+      status = STATUS.UNKNOWN;
+      reason = 'session.idle:status unknown';
+      break;
+    }
     case 'session.compacted': {
-      status = STATUS.DONE;
+      status = previousState ? previousState.status : STATUS.UNKNOWN;
       reason = event.type;
       break;
     }
@@ -139,7 +143,7 @@ export function mapOpenCodeEvent(event, previousState = null) {
         status = STATUS.YOUR_TURN;
       } else if (/busy|work|run|active|processing|retry|pending|streaming/.test(st)) {
         status = STATUS.COOKING;
-      } else if (/idle|done|complete|finish/.test(st)) {
+      } else if (/done|complete|finish/.test(st)) {
         status = STATUS.DONE;
       } else if (/error|fail|burn|aborted/.test(st)) {
         status = STATUS.BURN;
