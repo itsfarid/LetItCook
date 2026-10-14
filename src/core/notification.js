@@ -107,6 +107,7 @@ export class NotificationTracker {
     this.cachePath = options.cachePath || null;
     this.notifyDone = options.notifyDone === true;
     this.suppressInitial = options.suppressInitial !== false;
+    this.readOnly = options.readOnly === true;
     this._isFirstScan = this.suppressInitial;
     this._cache = {
       _config: { notifyDone: this.notifyDone },
@@ -137,7 +138,7 @@ export class NotificationTracker {
   }
 
   save() {
-    if (!this.cachePath) return;
+    if (!this.cachePath || this.readOnly) return;
     let tmpPath = null;
     try {
       this._cache._config = { notifyDone: this.notifyDone };
