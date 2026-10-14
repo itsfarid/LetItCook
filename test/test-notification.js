@@ -216,6 +216,165 @@ function testNotificationTrackerLifecycle() {
   }
 }
 
+function testPrivateAtomicCachePersistence() {
+  assert.ok(typeof fs.constants.O_NOFOLLOW === 'number' && fs.constants.O_NOFOLLOW !== 0,
+    'secure cache access requires platform O_NOFOLLOW support');
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'letitcook-private-cache-'));
+  const cacheDir = path.join(root, 'letitcook');
+  const cachePath = path.join(cacheDir, 'notify_cache.json');
+  const mode = p => fs.lstatSync(p).mode & 0o777;
+  try {
+    fs.mkdirSync(cacheDir, { recursive: true, mode: 0o755 });
+    fs.chmodSync(cacheDir, 0o755);
+    fs.writeFileSync(cachePath, '{"old":true}', { mode: 0o644 });
+    fs.chmodSync(cachePath, 0o644);
+
+    const tracker = new NotificationTracker({ cachePath, suppressInitial: false });
+    tracker._cache.sessions.secure = { lastStatus: STATUS.COOKING };
+    tracker.save();
+
+    assert.strictEqual(mode(cacheDir), 0o700, 'cache directory must be private');
+    assert.strictEqual(mode(cachePath), 0o600, 'replacement cache must be private');
+    assert.strictEqual(JSON.parse(fs.readFileSync(cachePath, 'utf8')).sessions.secure.lastStatus, STATUS.COOKING);
+    assert.deepStrictEqual(fs.readdirSync(cacheDir), ['notify_cache.json'], 'successful save leaves no temp file');
+
+    // A failed rename leaves the old cache contents intact and removes our private temp.
+    const oldContents = fs.readFileSync(cachePath, 'utf8');
+    const originalRename = fs.renameSync;
+    let observedTemp = false;
+    fs.renameSync = (from, to) => {
+      assert.strictEqual(path.dirname(from), cacheDir, 'temp must share target directory');
+      assert.strictEqual(to, cachePath);
+      assert.strictEqual(mode(from), 0o600, 'temp file must be owner-only before rename');
+      observedTemp = true;
+      throw new Error('injected rename failure');
+    };
+    try {
+      tracker._cache.sessions.secure.lastStatus = STATUS.BURN;
+      tracker.save();
+    } finally {
+      fs.renameSync = originalRename;
+    }
+    assert.ok(observedTemp, 'rename failure injection reached');
+    assert.strictEqual(fs.readFileSync(cachePath, 'utf8'), oldContents, 'failed atomic replacement preserves old contents');
+    assert.deepStrictEqual(fs.readdirSync(cacheDir), ['notify_cache.json'], 'failed save cleans up temp file');
+
+    // A write failure also closes and removes the securely-created temp file.
+    const originalWrite = fs.writeFileSync;
+    let observedWriteTemp = false;
+    fs.writeFileSync = (target, ...args) => {
+      if (typeof target === 'number') {
+        observedWriteTemp = true;
+        throw new Error('injected write failure');
+      }
+      return originalWrite(target, ...args);
+    };
+    try {
+      tracker.save();
+    } finally {
+      fs.writeFileSync = originalWrite;
+    }
+    assert.ok(observedWriteTemp, 'write failure injection reached');
+    assert.strictEqual(fs.readFileSync(cachePath, 'utf8'), oldContents, 'write failure preserves cache contents');
+    assert.deepStrictEqual(fs.readdirSync(cacheDir), ['notify_cache.json'], 'write failure cleans up temp file');
+
+    // A changed target detected before rename aborts and preserves the replacement.
+    const originalLstat = fs.lstatSync;
+    const racedContents = '{"unrelated":true}';
+    const raceSource = path.join(cacheDir, 'race-source');
+    originalWrite(raceSource, racedContents, 'utf8');
+    let cacheTargetChecks = 0;
+    fs.lstatSync = (target, ...args) => {
+      if (target === cachePath && ++cacheTargetChecks === 2) {
+        fs.unlinkSync(cachePath);
+        fs.renameSync(raceSource, cachePath);
+      }
+      return originalLstat(target, ...args);
+    };
+    try {
+      tracker.save();
+    } finally {
+      fs.lstatSync = originalLstat;
+    }
+    assert.strictEqual(fs.readFileSync(cachePath, 'utf8'), racedContents, 'changed target is not replaced');
+    assert.deepStrictEqual(fs.readdirSync(cacheDir), ['notify_cache.json'], 'race abort cleans up temp file');
+    fs.writeFileSync(cachePath, oldContents, 'utf8');
+    fs.chmodSync(cachePath, 0o600);
+
+    // Cache symlinks must never be chmod-ed, followed, or replaced by the Node writer.
+    const victim = path.join(root, 'victim.json');
+    fs.writeFileSync(victim, '{"sensitive":true}');
+    fs.chmodSync(victim, 0o644);
+    const victimBefore = { content: fs.readFileSync(victim, 'utf8'), mode: mode(victim), mtime: fs.statSync(victim).mtimeMs };
+    fs.unlinkSync(cachePath);
+    fs.symlinkSync(victim, cachePath);
+    const symlinkTracker = new NotificationTracker({ cachePath, suppressInitial: false });
+    symlinkTracker._cache.sessions.bad = { lastStatus: STATUS.BURN };
+    symlinkTracker.save();
+    assert.ok(fs.lstatSync(cachePath).isSymbolicLink(), 'existing symlink must remain untouched');
+    assert.deepStrictEqual({ content: fs.readFileSync(victim, 'utf8'), mode: mode(victim), mtime: fs.statSync(victim).mtimeMs }, victimBefore);
+    assert.deepStrictEqual(fs.readdirSync(cacheDir), ['notify_cache.json']);
+
+    // Hard links are also rejected so chmod cannot alter an unrelated alias.
+    fs.unlinkSync(cachePath);
+    fs.linkSync(victim, cachePath);
+    const linkedVictimBefore = { content: fs.readFileSync(victim, 'utf8'), mode: mode(victim) };
+    const hardlinkTracker = new NotificationTracker({ cachePath, suppressInitial: false });
+    hardlinkTracker.save();
+    assert.strictEqual(fs.statSync(cachePath).ino, fs.statSync(victim).ino, 'hard link is not replaced');
+    assert.deepStrictEqual({ content: fs.readFileSync(victim, 'utf8'), mode: mode(victim) }, linkedVictimBefore);
+
+    // A symlink used as the cache directory is rejected without chmod or writes to its target.
+    const unrelated = path.join(root, 'unrelated');
+    fs.mkdirSync(unrelated);
+    fs.chmodSync(unrelated, 0o755);
+    const unrelatedMode = mode(unrelated);
+    const linkedDir = path.join(root, 'linked-letitcook');
+    fs.symlinkSync(unrelated, linkedDir);
+    const linkedTracker = new NotificationTracker({ cachePath: path.join(linkedDir, 'notify_cache.json') });
+    linkedTracker.save();
+    assert.strictEqual(mode(unrelated), unrelatedMode, 'symlink target directory permissions stay unchanged');
+    assert.deepStrictEqual(fs.readdirSync(unrelated), []);
+
+    // Non-regular targets are refused rather than replaced.
+    const nonRegularTarget = path.join(cacheDir, 'directory-target');
+    fs.mkdirSync(nonRegularTarget);
+    fs.chmodSync(nonRegularTarget, 0o755);
+    const nonRegularTracker = new NotificationTracker({ cachePath: nonRegularTarget });
+    nonRegularTracker.save();
+    assert.ok(fs.lstatSync(nonRegularTarget).isDirectory());
+    assert.strictEqual(mode(nonRegularTarget), 0o755);
+    assert.deepStrictEqual(fs.readdirSync(nonRegularTarget), []);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+}
+
+function testReadOnlyCachePersistence() {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'letitcook-readonly-cache-'));
+  const dir = path.join(root, 'letitcook');
+  const cachePath = path.join(dir, 'notify_cache.json');
+  const mode = p => fs.lstatSync(p).mode & 0o777;
+  try {
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(cachePath, JSON.stringify({ _config: { notifyDone: true }, sessions: {} }));
+    fs.chmodSync(dir, 0o755);
+    fs.chmodSync(cachePath, 0o644);
+    const old = new Date(Date.now() - 60_000);
+    fs.utimesSync(cachePath, old, old);
+    const before = { content: fs.readFileSync(cachePath, 'utf8'), mode: mode(cachePath), dirMode: mode(dir), mtime: fs.statSync(cachePath).mtimeMs };
+
+    const tracker = new NotificationTracker({ cachePath, readOnly: true, suppressInitial: false });
+    tracker.processSessions([{ session_id: 's', status: STATUS.BURN }]);
+    tracker.save();
+    const after = { content: fs.readFileSync(cachePath, 'utf8'), mode: mode(cachePath), dirMode: mode(dir), mtime: fs.statSync(cachePath).mtimeMs };
+    assert.deepStrictEqual(after, before, 'read-only inspection cannot change contents, modes, or mtime');
+    assert.strictEqual(tracker.notifyDone, true, 'read-only load preserves persisted preference');
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+}
+
 function testAtomicCacheSaveAndCleanup() {
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'letitcook-atomic-'));
   const cachePath = path.join(tmpDir, 'notify_cache.json');
@@ -413,6 +572,8 @@ function run() {
   testShouldNotify();
   testFormatNotification();
   testNotificationTrackerLifecycle();
+  testPrivateAtomicCachePersistence();
+  testReadOnlyCachePersistence();
   testAtomicCacheSaveAndCleanup();
   testUnchangedCacheAvoidsDiskWrite();
   testTerminalNotificationDeduplicationAndSuppression();

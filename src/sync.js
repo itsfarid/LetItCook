@@ -9,11 +9,12 @@
 // Env:
 //   LETITCOOK_STATE_DIR   target dir (default ~/.local/state/letitcook/sessions)
 //   LETITCOOK_COPILOT_DIR copilot home override (default ~/.copilot)
-import fs from 'node:fs';
+
 import path from 'node:path';
 import os from 'node:os';
 import { defaultRegistry } from './core/registry.js';
 import { getSessionDir } from './adapters/opencode/adapter.js';
+import { ensurePrivateDir } from './core/fs-safe.js';
 
 function syncOnce(targetDir) {
   const synced = defaultRegistry.syncAll(targetDir);
@@ -32,7 +33,7 @@ const targetDir = getSessionDir();
 
 if (args[0] === '--watch') {
   const intervalMs = Math.max(1000, parseInt(args[1] || '5000', 10) || 5000);
-  fs.mkdirSync(targetDir, { recursive: true });
+  ensurePrivateDir(targetDir);
   const tick = () => {
     try {
       syncOnce(targetDir);
@@ -49,7 +50,7 @@ if (args[0] === '--watch') {
 } else if (args[0] === '--help' || args[0] === '-h') {
   console.log('Usage: node src/sync.js [--watch [ms]]');
 } else {
-  fs.mkdirSync(targetDir, { recursive: true });
+  ensurePrivateDir(targetDir);
   syncOnce(targetDir);
 }
 

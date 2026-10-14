@@ -161,14 +161,108 @@ function testFilesystemNotificationFlow() {
   }
 }
 
+function testRunNotifyCannotConsumePendingNotification() {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'letitcook-run-notify-ro-'));
+  const sessionDir = path.join(tmpDir, 'sessions');
+  const cachePath = path.join(tmpDir, 'state', 'letitcook', 'notify_cache.json');
+  fs.mkdirSync(sessionDir, { recursive: true });
+  fs.mkdirSync(path.dirname(cachePath), { recursive: true });
+  try {
+    fs.writeFileSync(cachePath, JSON.stringify({
+      _config: { notifyDone: true },
+      sessions: { pending: { lastStatus: STATUS.COOKING, notifiedStatus: null } },
+    }));
+    fs.chmodSync(path.dirname(cachePath), 0o755);
+    fs.chmodSync(cachePath, 0o644);
+    writeSessionFile({
+      session_id: 'pending', agent: 'opencode', status: STATUS.BURN,
+      reason: 'test failure', updated_at: Date.now(),
+    }, sessionDir);
+    const old = new Date(Date.now() - 60_000);
+    fs.utimesSync(cachePath, old, old);
+    const before = {
+      content: fs.readFileSync(cachePath, 'utf8'),
+      fileMode: fs.statSync(cachePath).mode & 0o777,
+      dirMode: fs.statSync(path.dirname(cachePath)).mode & 0o777,
+      mtime: fs.statSync(cachePath).mtimeMs,
+    };
+
+    const first = runNotify({ sessionDir, cachePath });
+    const second = runNotify({ sessionDir, cachePath });
+    assert.strictEqual(first.eventsCount, 1);
+    assert.strictEqual(second.eventsCount, 1, 'repeated inspection must not consume pending event');
+    assert.strictEqual(first.notifyDone, true);
+    assert.deepStrictEqual({
+      content: fs.readFileSync(cachePath, 'utf8'),
+      fileMode: fs.statSync(cachePath).mode & 0o777,
+      dirMode: fs.statSync(path.dirname(cachePath)).mode & 0o777,
+      mtime: fs.statSync(cachePath).mtimeMs,
+    }, before);
+
+    // --watch reuses a read-only tracker, deduplicating in memory only.
+    const watchTracker = new NotificationTracker({ cachePath, suppressInitial: false, readOnly: true });
+    assert.strictEqual(runNotify({ sessionDir, cachePath, tracker: watchTracker }).eventsCount, 1);
+    assert.strictEqual(runNotify({ sessionDir, cachePath, tracker: watchTracker }).eventsCount, 0);
+    assert.deepStrictEqual({
+      content: fs.readFileSync(cachePath, 'utf8'),
+      fileMode: fs.statSync(cachePath).mode & 0o777,
+      dirMode: fs.statSync(path.dirname(cachePath)).mode & 0o777,
+      mtime: fs.statSync(cachePath).mtimeMs,
+    }, before, 'watch deduplication stays in memory');
+
+    const extensionTracker = new NotificationTracker({ cachePath, suppressInitial: false });
+    assert.strictEqual(extensionTracker.processSessions(readAllSessionsFromDir(sessionDir)).length, 1,
+      'the extension writer can still process the pending notification');
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+}
+
 function testCliProcessExecution() {
   const notifyScript = path.resolve('src/notify.js');
+  const isolated = fs.mkdtempSync(path.join(os.tmpdir(), 'letitcook-notify-cli-'));
+  const env = {
+    ...process.env,
+    HOME: isolated,
+    XDG_STATE_HOME: path.join(isolated, 'state'),
+    XDG_DATA_HOME: path.join(isolated, 'data'),
+  };
 
-  // Default one-shot runs cleanly with exit 0 and outputs valid JSON
-  const stdout = execFileSync('node', [notifyScript], { encoding: 'utf8' });
+  try {
+  const cachePath = path.join(env.XDG_STATE_HOME, 'letitcook', 'notify_cache.json');
+  fs.mkdirSync(path.dirname(cachePath), { recursive: true });
+  fs.writeFileSync(cachePath, JSON.stringify({ _config: { notifyDone: true }, sessions: {} }));
+  fs.chmodSync(path.dirname(cachePath), 0o755);
+  fs.chmodSync(cachePath, 0o644);
+  const old = new Date(Date.now() - 60_000);
+  fs.utimesSync(cachePath, old, old);
+  const before = {
+    content: fs.readFileSync(cachePath, 'utf8'),
+    mode: fs.statSync(cachePath).mode & 0o777,
+    dirMode: fs.statSync(path.dirname(cachePath)).mode & 0o777,
+    mtime: fs.statSync(cachePath).mtimeMs,
+  };
+
+  // Default one-shot runs cleanly with exit 0 and outputs JSON without cache mutations.
+  const stdout = execFileSync('node', [notifyScript], { encoding: 'utf8', env });
   const parsed = JSON.parse(stdout);
   assert.strictEqual(parsed.ok, true);
   assert.strictEqual(parsed.owner, 'gnome-extension');
+  assert.deepStrictEqual({
+    content: fs.readFileSync(cachePath, 'utf8'),
+    mode: fs.statSync(cachePath).mode & 0o777,
+    dirMode: fs.statSync(path.dirname(cachePath)).mode & 0o777,
+    mtime: fs.statSync(cachePath).mtimeMs,
+  }, before, 'CLI process inspection must not alter cache contents, permissions, or mtime');
+
+  // --include-done is an inspection-only override and is also read-only.
+  execFileSync('node', [notifyScript, '--include-done'], { encoding: 'utf8', env });
+  assert.deepStrictEqual({
+    content: fs.readFileSync(cachePath, 'utf8'),
+    mode: fs.statSync(cachePath).mode & 0o777,
+    dirMode: fs.statSync(path.dirname(cachePath)).mode & 0o777,
+    mtime: fs.statSync(cachePath).mtimeMs,
+  }, before);
 
   // --dispatch must exit non-zero (exit code 1) to prevent competing dispatch
   let dispatchFailed = false;
@@ -181,6 +275,13 @@ function testCliProcessExecution() {
     assert.ok(stderr.includes('unsupported'), 'Error output must state that dispatch is unsupported');
   }
   assert.strictEqual(dispatchFailed, true, '--dispatch must fail execution');
+
+  fs.unlinkSync(cachePath);
+  execFileSync('node', [notifyScript], { encoding: 'utf8', env });
+  assert.strictEqual(fs.existsSync(cachePath), false, 'inspection must not create a missing cache');
+  } finally {
+    fs.rmSync(isolated, { recursive: true, force: true });
+  }
 }
 
 function testTerminatedSessionNotificationEvaluationAndCleanup() {
@@ -461,6 +562,7 @@ function run() {
   testCliInspectionIsReadOnly();
   testCliInspectionWithoutCacheDoesNotCreateIt();
   testCliProcessIsReadOnlyAndDispatchTest();
+  testRunNotifyCannotConsumePendingNotification();
   testCliProcessExecution();
   testTerminatedSessionNotificationEvaluationAndCleanup();
   console.log('All LetItCook notification integration tests passed.');

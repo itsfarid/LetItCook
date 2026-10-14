@@ -35,10 +35,9 @@ export function runNotify(options = {}) {
 
   const sessionDir = options.sessionDir || getSessionDir();
   const cachePath = options.cachePath || getCachePath();
-  // Inspection is strictly read-only: the cache is loaded but never written, so
-  // pending notifications stay pending for the GNOME extension and the persisted
-  // notifyDone preference is untouched. `notifyDone: true` is a one-off override.
-  const tracker = new NotificationTracker({
+  // Inspection is strictly read-only: pending notifications remain available to
+  // GNOME Shell, and any notifyDone override applies only to this tracker.
+  const tracker = (options.tracker && options.tracker.readOnly === true) ? options.tracker : new NotificationTracker({
     cachePath,
     notifyDone: options.notifyDone === true ? true : undefined,
     suppressInitial: options.suppressInitial === true,
@@ -116,17 +115,16 @@ CLI automatic dispatch is unsupported to prevent duplicate alerts and race condi
     const idx = args.indexOf('--watch');
     const intervalMs = Math.max(1000, parseInt(args[idx + 1] || '5000', 10) || 5000);
     console.error(`[letitcook-notify] Watching every ${intervalMs}ms (GNOME extension is primary owner)`);
-    const seen = new Set();
+    const cachePath = getCachePath();
+    const tracker = new NotificationTracker({
+      cachePath,
+      notifyDone,
+      suppressInitial: false,
+      readOnly: true,
+    });
     const tick = () => {
       try {
-        const result = runNotify({ notifyDone });
-        result.events = result.events.filter(e => {
-          const key = `${e.session_id}:${e.status}`;
-          if (seen.has(key)) return false;
-          seen.add(key);
-          return true;
-        });
-        result.eventsCount = result.events.length;
+        const result = runNotify({ notifyDone, tracker });
         if (result.eventsCount > 0) {
           console.log(JSON.stringify(result));
         }

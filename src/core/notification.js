@@ -1,7 +1,91 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
+import { randomBytes } from 'node:crypto';
 import { STATUS } from './status.js';
+
+const PRIVATE_FILE_MODE = 0o600;
+
+function noFollowFlag() {
+  const flag = fs.constants.O_NOFOLLOW;
+  if (typeof flag !== 'number' || flag === 0) {
+    throw new Error('Secure notification cache access requires O_NOFOLLOW');
+  }
+  return flag;
+}
+
+function statOrNull(filePath) {
+  try {
+    return fs.lstatSync(filePath);
+  } catch (error) {
+    if (error.code === 'ENOENT') return null;
+    throw error;
+  }
+}
+
+function ensurePrivateCacheDirectory(dir) {
+  fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+  const stat = fs.lstatSync(dir);
+  if (!stat.isDirectory() || stat.isSymbolicLink()) {
+    throw new Error('Notification cache directory must be a real directory');
+  }
+  if (typeof process.getuid === 'function' && stat.uid !== process.getuid()) {
+    throw new Error('Notification cache directory is not owned by the current user');
+  }
+
+  const fd = fs.openSync(dir, fs.constants.O_RDONLY | fs.constants.O_DIRECTORY | noFollowFlag());
+  try {
+    const opened = fs.fstatSync(fd);
+    if (!opened.isDirectory() || opened.dev !== stat.dev || opened.ino !== stat.ino) {
+      throw new Error('Notification cache directory changed while opening');
+    }
+    fs.fchmodSync(fd, 0o700);
+  } finally {
+    fs.closeSync(fd);
+  }
+}
+
+function openCacheReadOnly(cachePath) {
+  const dirStat = fs.lstatSync(path.dirname(cachePath));
+  if (!dirStat.isDirectory() || dirStat.isSymbolicLink()) return null;
+
+  const fd = fs.openSync(cachePath, fs.constants.O_RDONLY | noFollowFlag());
+  try {
+    const stat = fs.fstatSync(fd);
+    if (!stat.isFile() || stat.nlink !== 1 ||
+        (typeof process.getuid === 'function' && stat.uid !== process.getuid())) {
+      fs.closeSync(fd);
+      return null;
+    }
+    return fd;
+  } catch (error) {
+    try { fs.closeSync(fd); } catch {}
+    throw error;
+  }
+}
+
+function prepareExistingCache(cachePath) {
+  const existing = statOrNull(cachePath);
+  if (!existing) return null;
+  if (!existing.isFile() || existing.isSymbolicLink() || existing.nlink !== 1) {
+    throw new Error('Notification cache must be a standalone regular file, not a symlink or hard link');
+  }
+  if (typeof process.getuid === 'function' && existing.uid !== process.getuid()) {
+    throw new Error('Notification cache is not owned by the current user');
+  }
+
+  const fd = fs.openSync(cachePath, fs.constants.O_RDONLY | noFollowFlag());
+  try {
+    const opened = fs.fstatSync(fd);
+    if (!opened.isFile() || opened.nlink !== 1 || opened.dev !== existing.dev || opened.ino !== existing.ino) {
+      throw new Error('Notification cache changed while opening');
+    }
+    fs.fchmodSync(fd, PRIVATE_FILE_MODE);
+    return { dev: opened.dev, ino: opened.ino };
+  } finally {
+    fs.closeSync(fd);
+  }
+}
 
 export const NOTIFY_DEFAULTS = Object.freeze({
   notifyDone: false,
@@ -105,9 +189,9 @@ export function formatNotification(session) {
 export class NotificationTracker {
   constructor(options = {}) {
     this.cachePath = options.cachePath || null;
+    this.readOnly = options.readOnly === true;
     this.notifyDone = options.notifyDone === true;
     this.suppressInitial = options.suppressInitial !== false;
-    this.readOnly = options.readOnly === true;
     this._isFirstScan = this.suppressInitial;
     this._cache = {
       _config: { notifyDone: this.notifyDone },
@@ -121,9 +205,11 @@ export class NotificationTracker {
 
   load(options = {}) {
     if (!this.cachePath) return;
+    let fd = null;
     try {
-      if (fs.existsSync(this.cachePath)) {
-        const raw = JSON.parse(fs.readFileSync(this.cachePath, 'utf8'));
+      fd = openCacheReadOnly(this.cachePath);
+      if (fd !== null) {
+        const raw = JSON.parse(fs.readFileSync(fd, 'utf8'));
         if (raw && typeof raw === 'object') {
           if (options.notifyDone === undefined && raw._config && typeof raw._config.notifyDone === 'boolean') {
             this.notifyDone = raw._config.notifyDone;
@@ -135,6 +221,10 @@ export class NotificationTracker {
       }
     } catch {
       this._cache = { _config: { notifyDone: this.notifyDone }, sessions: {} };
+    } finally {
+      if (fd !== null) {
+        try { fs.closeSync(fd); } catch {}
+      }
     }
     this._cache._config = { notifyDone: this.notifyDone };
     this._lastSavedJson = JSON.stringify(this._cache, null, 2);
@@ -143,6 +233,7 @@ export class NotificationTracker {
   save(force = false) {
     if (!this.cachePath || this.readOnly) return false;
     let tmpPath = null;
+    let fd = null;
     try {
       this._cache._config = { notifyDone: this.notifyDone };
       const serialized = JSON.stringify(this._cache, null, 2);
@@ -150,22 +241,54 @@ export class NotificationTracker {
         return false;
       }
       const dir = path.dirname(this.cachePath);
-      if (!fs.existsSync(dir)) {
-        fs.mkdirSync(dir, { recursive: true });
+      ensurePrivateCacheDirectory(dir);
+      const existingIdentity = prepareExistingCache(this.cachePath);
+
+      for (let attempt = 0; attempt < 5 && fd === null; attempt++) {
+        tmpPath = path.join(dir, `.notify_cache.tmp.${process.pid}.${randomBytes(8).toString('hex')}`);
+        try {
+          fd = fs.openSync(tmpPath, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | noFollowFlag(), PRIVATE_FILE_MODE);
+        } catch (error) {
+          if (error.code !== 'EEXIST') throw error;
+          tmpPath = null;
+        }
       }
-      tmpPath = path.join(dir, `.notify_cache.tmp.${process.pid}.${Date.now()}`);
-      fs.writeFileSync(tmpPath, serialized, 'utf8');
+      if (fd === null || tmpPath === null) throw new Error('Could not allocate a unique notification cache temp file');
+
+      fs.fchmodSync(fd, PRIVATE_FILE_MODE);
+      fs.writeFileSync(fd, serialized, 'utf8');
+      fs.fsyncSync(fd);
+      fs.closeSync(fd);
+      fd = null;
+
+      // This identity recheck narrows accidental target races, but it is not an
+      // atomic compare-and-rename. The private directory prevents other UIDs
+      // from racing this path; concurrent same-UID writers remain a limitation.
+      const current = statOrNull(this.cachePath);
+      if (existingIdentity) {
+        if (!current || !current.isFile() || current.isSymbolicLink() || current.nlink !== 1 ||
+            current.dev !== existingIdentity.dev || current.ino !== existingIdentity.ino) {
+          throw new Error('Notification cache target changed before replacement');
+        }
+      } else if (current) {
+        throw new Error('Notification cache target appeared before replacement');
+      }
+
       fs.renameSync(tmpPath, this.cachePath);
+      tmpPath = null;
       this._lastSavedJson = serialized;
       return true;
     } catch {
-      if (tmpPath) {
-        try {
-          if (fs.existsSync(tmpPath)) fs.unlinkSync(tmpPath);
-        } catch {}
+      // Persistence failures must not break status processing; remove only our temp.
+    } finally {
+      if (fd !== null) {
+        try { fs.closeSync(fd); } catch {}
       }
-      return false;
+      if (tmpPath) {
+        try { fs.unlinkSync(tmpPath); } catch {}
+      }
     }
+    return false;
   }
 
   processSessions(sessions = []) {
