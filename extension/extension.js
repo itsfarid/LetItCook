@@ -321,7 +321,9 @@ class LetItCookButton extends PanelMenu.Button {
 
     _update() {
         const sessions = this._readSessions();
-        this._currentSessions = sessions.filter(s => !s.terminated);
+        // Keep a just-terminated Done/Burn state visible through this update; the file is
+        // cleaned below, and the next scan naturally returns to Unknown.
+        this._currentSessions = sessions;
         this._checkNotifications(sessions);
 
         // Clean up terminated session files after notification evaluation

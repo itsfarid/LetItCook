@@ -517,6 +517,31 @@ function testTerminalNotificationDeduplicationAndSuppression() {
     const events2 = tracker.processSessions(done);
     assert.strictEqual(events2.length, 0, 'Subsequent scan with Done must not re-notify');
 
+    // 5b. Subsequent genuine completion after resuming cooking produces a new notification
+    const resumedCooking = [{ session_id: 'term-1', agent: 'opencode', status: STATUS.COOKING }];
+    const resumeEvents = tracker.processSessions(resumedCooking);
+    assert.strictEqual(resumeEvents.length, 0, 'Return to cooking must not notify');
+
+    const secondDone = [{ session_id: 'term-1', agent: 'opencode', status: STATUS.DONE, title: 'Second job complete' }];
+    const secondDoneEvents = tracker.processSessions(secondDone);
+    assert.strictEqual(secondDoneEvents.length, 1, 'Later genuine completion must produce a new notification');
+    assert.strictEqual(secondDoneEvents[0].reason, 'done');
+
+    // 5c. Multi-session independence: notification cache state for one session does not suppress another
+    const otherCooking = [
+      { session_id: 'term-1', agent: 'opencode', status: STATUS.DONE },
+      { session_id: 'term-other', agent: 'opencode', status: STATUS.COOKING },
+    ];
+    tracker.processSessions(otherCooking);
+
+    const otherDone = [
+      { session_id: 'term-1', agent: 'opencode', status: STATUS.DONE },
+      { session_id: 'term-other', agent: 'opencode', status: STATUS.DONE, title: 'Other job complete' },
+    ];
+    const otherDoneEvents = tracker.processSessions(otherDone);
+    assert.strictEqual(otherDoneEvents.length, 1, 'Independent session completion must notify');
+    assert.strictEqual(otherDoneEvents[0].session.session_id, 'term-other');
+
     // 6. Eligible Burn (Cooking -> Burn) notifies exactly once
     const burn = [{ session_id: 'term-2', agent: 'opencode', status: STATUS.BURN, reason: 'Segmentation fault' }];
     const burnEvents1 = tracker.processSessions(burn);
