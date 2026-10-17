@@ -301,8 +301,17 @@ function testNotificationIntegrationParity() {
     assert.ok(code.includes('PopupSwitchMenuItem'), `${target} must include PopupSwitchMenuItem for Done toggle`);
     assert.ok(code.includes("'Notify on Done'"), `${target} must include 'Notify on Done' menu toggle`);
     assert.ok(code.includes('notify_cache.json'), `${target} must use notify_cache.json`);
-    assert.ok(code.includes('s.terminated && s.filePath'), `${target} must clean up terminated sessions after notification evaluation`);
-    assert.ok(code.includes('sessions.filter(s => !s.terminated)'), `${target} must exclude terminated sessions from current sessions`);
+    const updateStart = code.indexOf('    _update() {');
+    const updateEnd = code.indexOf('\n    _rebuildMenu()', updateStart);
+    assert.notStrictEqual(updateStart, -1, `${target} must define _update()`);
+    assert.notStrictEqual(updateEnd, -1, `${target} must define _rebuildMenu()`);
+    const update = code.slice(updateStart, updateEnd);
+    const notificationIndex = update.indexOf('this._checkNotifications(sessions)');
+    const cleanupIndex = update.indexOf('if (s.terminated && s.filePath)');
+    assert.ok(update.includes('this._currentSessions = sessions;'),
+      `${target} must keep terminal states visible during the update that evaluates them`);
+    assert.ok(notificationIndex >= 0 && cleanupIndex > notificationIndex,
+      `${target} must evaluate notifications before cleaning up terminal session files`);
   }
 }
 

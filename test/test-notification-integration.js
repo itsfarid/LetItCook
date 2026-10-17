@@ -131,6 +131,29 @@ function testFilesystemNotificationFlow() {
     assert.strictEqual(doneEvents.length, 1, 'Opt-in Done must notify when transitioning from cooking');
     assert.strictEqual(doneEvents[0].urgency, 'normal');
 
+    // 6b. Subsequent genuine completion after resuming cooking produces new notification
+    writeSessionFile({
+      session_id: 'sess-2',
+      agent: 'copilot',
+      status: STATUS.COOKING,
+      updated_at: Date.now() + 10,
+    }, sessionDir);
+    sessions = readAllSessionsFromDir(sessionDir);
+    const resumeEvents = doneTracker.processSessions(sessions);
+    assert.strictEqual(resumeEvents.length, 0, 'Resumed cooking must not notify');
+
+    writeSessionFile({
+      session_id: 'sess-2',
+      agent: 'copilot',
+      status: STATUS.DONE,
+      title: 'Tests passed again',
+      updated_at: Date.now() + 20,
+    }, sessionDir);
+    sessions = readAllSessionsFromDir(sessionDir);
+    const secondDoneEvents = doneTracker.processSessions(sessions);
+    assert.strictEqual(secondDoneEvents.length, 1, 'Subsequent genuine completion must notify');
+    assert.strictEqual(secondDoneEvents[0].reason, 'done');
+
     // 7. Untrustworthy / corrupt session file: must NOT notify
     fs.writeFileSync(path.join(sessionDir, 'corrupt.json'), '{ invalid json @@', 'utf8');
     sessions = readAllSessionsFromDir(sessionDir);
