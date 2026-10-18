@@ -4,7 +4,7 @@ import path from 'node:path';
 import os from 'node:os';
 import { execFileSync } from 'node:child_process';
 import { STATUS, STATUS_META, normalizeSession } from '../src/core/status.js';
-import { NotificationTracker, shortCwd } from '../src/core/notification.js';
+import { NotificationTracker, formatNotification } from '../src/core/notification.js';
 
 function testModernMetadataCompatibility() {
   const metadataPath = path.resolve('extension/metadata.json');
@@ -375,6 +375,24 @@ function loadExtensionMethod(target, name, deps) {
   return new Function(...names, `return function ${name}(${param}) {\n${body}\n};`)(...names.map(n => all[n]));
 }
 
+// Top-level notification helpers of a variant (shortCwd uses the real home directory).
+const NOTIFICATION_HELPERS = ['shortCwd', 'cleanNotificationText', 'notificationReason', 'formatNotificationBody'];
+function loadExtensionNotificationHelpers(target) {
+  const code = fs.readFileSync(path.resolve(`${target}/extension.js`), 'utf8');
+  const consts = ['NOTIFY_SUBJECT_MAX', 'NOTIFY_REASON_MAX', 'SECRET_WORD', 'SECRET_ASSIGNMENT_RE', 'SECRET_FLAG_RE'].map((name) => {
+    const match = code.match(new RegExp(`\\nconst ${name} = [^\\n]+`));
+    assert.ok(match, `${target}: const ${name} not found`);
+    return match[0];
+  });
+  const functions = NOTIFICATION_HELPERS.map((name) => {
+    const match = code.match(new RegExp(`\\nfunction ${name}\\([^)]*\\) \\{[\\s\\S]*?\\n\\}\\n`));
+    assert.ok(match, `${target}: function ${name} not found`);
+    return match[0];
+  });
+  const GLib = { get_home_dir: () => os.homedir() };
+  return new Function('STATUS', 'GLib', `${consts.join('')}${functions.join('')}\nreturn { ${NOTIFICATION_HELPERS.join(', ')} };`)(STATUS, GLib);
+}
+
 function runExtensionReadSession(target, raw, pidAlive) {
   const Gio = {
     FileQueryInfoFlags: { NONE: 0 },
@@ -426,7 +444,7 @@ function testExtensionLifecycleParityWithNode() {
 function makeExtensionNotifier(target, notifyDone) {
   const notified = [];
   const Main = { notify: (title, body) => notified.push({ title, body }) };
-  const fn = loadExtensionMethod(target, '_checkNotifications', { Main, shortCwd });
+  const fn = loadExtensionMethod(target, '_checkNotifications', { Main, ...loadExtensionNotificationHelpers(target) });
   const self = {
     _notifyCache: { _config: { notifyDone }, sessions: {} },
     _notifyDone: notifyDone,
@@ -442,8 +460,66 @@ function makeExtensionNotifier(target, notifyDone) {
   };
 }
 
+// Untrusted reasons as adapters produce them: error messages with stack traces, commands
+// with credentials, private paths, terminal control sequences and output dumps.
+const HOSTILE_REASONS = {
+  [STATUS.BURN]: 'error:Model not found: aimurah/claude-sonnet-4.6.\n    at <anonymous> (/$bunfs/root/chunk-asxe09sd.js:439:94416)\n    at SessionPrompt.getModel (/$bunfs/root/chunk-v9f2av04.js:1142:11505)',
+  [STATUS.YOUR_TURN]: 'permission.asked:bash:curl -H "Authorization: Bearer sk-live-4f9a8b7c6d5e4f3a2b1c0d9e8f7a6b5c" https://api.example.com/v1/deploy',
+  cmd: 'permission.asked:bash:export OPENAI_API_KEY=sk-proj-abcdefghijklmnopqrstuvwxyz0123456789 && ./deploy.sh',
+};
+
+const SANITIZATION_CORPUS = [
+  ['stack trace', 'error:Model not found: aimurah/claude-sonnet-4.6.\n    at <anonymous> (/$bunfs/root/chunk-asxe09sd.js:439:94416)\n    at x (/home/alice/app.js:1:1)'],
+  ['bearer + url', 'permission.asked:bash:curl -H "Authorization: Bearer sk-live-4f9a8b7c6d5e4f3a2b1c0d9e8f7a6b5c" https://user:hunter2@api.example.com/v1/deploy?key=abc'],
+  ['env secret', 'permission.asked:bash:export OPENAI_API_KEY=sk-proj-abcdefghijklmnopqrstuvwxyz0123456789 && ./deploy.sh'],
+  ['flag secret', 'error:mysql --password hunter2 --token "two words" failed'],
+  ['private path', "error:ENOENT: no such file or directory, open '/home/alice/clients/acme/secrets/.env.production'"],
+  ['home path', 'error:cannot read ~/clients/acme/notes/prompt.txt'],
+  ['control chars', 'error:\u001b[31mfailed\u001b[0m\u0007 with\tbell\u0000 and \u009b8 C1'],
+  ['long output', `error:${'very long output line '.repeat(40)}`],
+  ['carriage return', 'error:first line\rsecond line with password=hunter2'],
+  ['question', 'question.asked:permission requested'],
+  ['plain', 'permission needed'],
+  ['benign words', 'error:max tokens per minute: 5000; secret sauce is fine'],
+  ['empty', ''],
+  ['non-string', 42],
+];
+const SECRETS = ['sk-live', 'sk-proj', 'hunter2', 'two words', '/home/alice', 'clients/acme', 'SessionPrompt', 'bunfs', 'second line', 'v1/deploy', 'key=abc'];
+
+function testNotificationSanitizationParity() {
+  for (const target of EXTENSION_TARGETS) {
+    const helpers = loadExtensionNotificationHelpers(target);
+    for (const status of [STATUS.YOUR_TURN, STATUS.BURN, STATUS.DONE]) {
+      for (const [label, reason] of SANITIZATION_CORPUS) {
+        for (const subject of [{ title: 'Deploy' }, { title: '', cwd: '/srv/app' }, { title: 'line one\nline two \u001b[1mbold' }]) {
+          const session = { agent: 'opencode', status, reason, ...subject };
+          const ref = formatNotification(session);
+          const body = helpers.formatNotificationBody(session);
+          const name = `${target} ${status} ${label} ${JSON.stringify(subject)}`;
+          assert.strictEqual(body, ref.body, `${name}: full body matches the Node reference`);
+          assert.ok(!/[\u0000-\u001f\u007f-\u009f]/.test(body), `${name}: no control characters`);
+          assert.ok(body.length <= 200, `${name}: bounded length (${body.length})`);
+          for (const secret of SECRETS) assert.ok(!body.includes(secret), `${name}: does not expose "${secret}": ${body}`);
+        }
+      }
+    }
+  }
+
+  // The reference keeps a useful short explanation.
+  const yt = formatNotification({ agent: 'opencode', status: STATUS.YOUR_TURN, title: 'Deploy', reason: SANITIZATION_CORPUS[1][1] });
+  assert.strictEqual(yt.body, 'Your Turn (permission.asked:bash) • Deploy');
+  const burn = formatNotification({ agent: 'opencode', status: STATUS.BURN, title: 'Deploy', reason: SANITIZATION_CORPUS[0][1] });
+  assert.strictEqual(burn.body, 'Burn: error:Model not found: aimurah/claude-sonnet-4.6. • Deploy');
+  const path = formatNotification({ agent: 'opencode', status: STATUS.BURN, title: 'Deploy', reason: SANITIZATION_CORPUS[4][1] });
+  assert.strictEqual(path.body, "Burn: error:ENOENT: no such file or directory, open '…/.env.production' • Deploy");
+  const benign = formatNotification({ agent: 'opencode', status: STATUS.BURN, title: 'Deploy', reason: SANITIZATION_CORPUS[11][1] });
+  assert.strictEqual(benign.body, 'Burn: error:max tokens per minute: 5000; secret sauce is fine • Deploy', 'ordinary words are not redacted');
+  const cwd = formatNotification({ agent: 'opencode', status: STATUS.DONE, cwd: '/srv/app' });
+  assert.strictEqual(cwd.body, 'Done • /srv/app', 'project identifier is kept');
+}
+
 function testExtensionNotificationParityWithTracker() {
-  const s = (session_id, status, extra = {}) => ({ session_id, agent: 'opencode', status, title: 'T', cwd: '', reason: '', ...extra });
+  const s = (session_id, status, extra = {}) => ({ session_id, agent: 'opencode', status, title: 'T', cwd: '', reason: HOSTILE_REASONS[session_id === 'a' ? status : 'cmd'] || '', ...extra });
   const scenarios = [
     // [notifyDone, steps]
     [false, [
@@ -481,7 +557,7 @@ function testExtensionNotificationParityWithTracker() {
         assert.strictEqual(got.length, want.length, `${target} notifyDone=${notifyDone} step ${i}: notification count`);
         want.forEach((w, j) => {
           assert.strictEqual(got[j].title, w.title, `${target} step ${i}: title`);
-          assert.ok(got[j].body.startsWith(w.body.split(' ')[0]), `${target} step ${i}: body status prefix`);
+          assert.strictEqual(got[j].body, w.body, `${target} step ${i}: full body`);
         });
       });
     }
@@ -503,6 +579,7 @@ function run() {
   testPackagingBothTargets();
   testExtensionLifecycleParityWithNode();
   testExtensionNotificationParityWithTracker();
+  testNotificationSanitizationParity();
   console.log('All LetItCook GNOME extension compatibility tests passed.');
 }
 
