@@ -254,6 +254,41 @@ function testTurnEndings() {
   }
 }
 
+function testSubagents() {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'letitcook-claude-sub-'));
+  const state = sid => new ClaudeAdapter().getSessionState(sid, { baseDir: dir });
+  const sub = { agent_id: 'agent-7', agent_type: 'Explore' };
+  try {
+    replay([
+      claudeEvent('UserPromptSubmit', 'm1'),
+      claudeEvent('PreToolUse', 'm1', { tool_name: 'Task', tool_use_id: 'toolu_task' }),
+      claudeEvent('SubagentStart', 'm1', sub),
+      claudeEvent('PreToolUse', 'm1', { ...sub, tool_name: 'Grep', tool_use_id: 'toolu_s1' }),
+      claudeEvent('PostToolUseFailure', 'm1', { ...sub, tool_name: 'Grep', tool_use_id: 'toolu_s1', is_interrupt: true }),
+      claudeEvent('SubagentStop', 'm1', { ...sub, agent_transcript_path: '/t', last_assistant_message: 'done' }),
+    ], dir);
+    assert.strictEqual(state('m1').status, STATUS.COOKING, 'a subagent finishing leaves the running parent Cooking');
+    assert.strictEqual(state('m1').reason, 'subagent:Explore');
+
+    // A subagent's permission request is the user's turn too, and is told apart from an
+    // identical request of the main agent.
+    const grep = { tool_name: 'Bash', tool_input: { command: 'ls' } };
+    replay([claudeEvent('PermissionRequest', 'm1', { ...sub, ...grep }), claudeEvent('PermissionRequest', 'm1', grep)], dir);
+    assert.strictEqual(state('m1').status, STATUS.YOUR_TURN);
+    replay([claudeEvent('PostToolUse', 'm1', { ...sub, ...grep, tool_use_id: 'a' })], dir);
+    assert.strictEqual(state('m1').status, STATUS.YOUR_TURN, "the main agent's request is still waiting");
+    replay([claudeEvent('PostToolUse', 'm1', { ...grep, tool_use_id: 'b' })], dir);
+    assert.strictEqual(state('m1').status, STATUS.COOKING);
+
+    replay([claudeEvent('Stop', 'm1')], dir);
+    assert.strictEqual(state('m1').status, STATUS.DONE);
+    replay([claudeEvent('PreToolUse', 'm1', { ...sub, tool_name: 'Read', tool_use_id: 'late' }), claudeEvent('SubagentStop', 'm1', sub)], dir);
+    assert.strictEqual(state('m1').status, STATUS.DONE, 'a background subagent working after Stop does not revive the parent');
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+}
+
 function testHookCommandEndToEnd() {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'letitcook-claude-e2e-'));
   try {
@@ -277,6 +312,7 @@ function run() {
   testActivityAndIdentity();
   testPermissionsAndQuestions();
   testTurnEndings();
+  testSubagents();
   testHookCommandEndToEnd();
   console.log('All LetItCook Claude Code adapter tests passed.');
 }
