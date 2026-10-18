@@ -192,7 +192,16 @@ export const codexSpec = {
     // request_user_input calls no hook (codex-rs core, verified by source search).
     questionAsk: () => null,
     questionResolve: () => null,
+    turnComplete: sid => codexEvent('Stop', sid, { stop_hook_active: false, last_assistant_message: SECRET }),
+    // Codex has no hook for a failed turn (it ends without Stop), so it is never Burn.
+    failure: () => null,
+    cancel: sid => codexEvent('Interrupt', sid),
+    sessionEnd: sid => codexEvent('SessionEnd', sid, { reason: 'other' }),
+    subagentActivity: sid => codexEvent('PreToolUse', sid, { agent_id: 'a1', agent_type: 'worker', tool_name: 'exec_command', tool_use_id: 'call_s', tool_input: { cmd: SECRET } }),
+    subagentComplete: sid => codexEvent('SubagentStop', sid, { agent_id: 'a1', agent_type: 'worker', last_assistant_message: SECRET }),
+    subagentFailure: () => null,
   },
+  expect: { cancel: STATUS.YOUR_TURN },
   malformed: [{ hook_event_name: 'PreToolUse' }, { hook_event_name: 'Stop', session_id: '../x' }, { hook_event_name: { a: 1 }, session_id: 's1' }],
   createAdapter: () => new CodexAdapter(),
   binEnv: ['CODEX_BIN'],

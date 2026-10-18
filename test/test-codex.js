@@ -95,6 +95,43 @@ function testPermissions() {
   });
 }
 
+function testTurnEndingsAndSubagents() {
+  withState((dir, state) => {
+    replay([codexEvent('UserPromptSubmit', 'th-s'), codexEvent('Stop', 'th-s', { stop_hook_active: false, last_assistant_message: 'x' })], dir);
+    assert.strictEqual(state('th-s').status, STATUS.DONE, 'Stop (successful turn) -> Done');
+    replay([codexEvent('Stop', 'th-s'), codexEvent('PostToolUse', 'th-s', { tool_name: 'exec_command' })], dir);
+    assert.strictEqual(state('th-s').status, STATUS.DONE, 'duplicate Stop and late PostToolUse keep Done');
+
+    // An errored turn ends without Stop: never Done, and no Burn without a hook for it.
+    replay([codexEvent('UserPromptSubmit', 'th-err'), codexEvent('PreToolUse', 'th-err', { tool_name: 'exec_command' })], dir);
+    assert.strictEqual(state('th-err').status, STATUS.COOKING);
+    const later = new CodexAdapter().detectSessions({ baseDir: dir, now: Date.now() + 6 * 60 * 1000, isPidAlive: () => true })
+      .find(x => x.session_id === 'th-err');
+    assert.strictEqual(later.status, STATUS.UNKNOWN, 'it becomes Unknown when it goes stale');
+
+    replay([codexEvent('UserPromptSubmit', 'th-i'), codexEvent('PermissionRequest', 'th-i', { tool_name: 'exec_command' }), codexEvent('Interrupt', 'th-i')], dir);
+    assert.strictEqual(state('th-i').status, STATUS.YOUR_TURN, 'Interrupt hands the turn back, it is not Burn');
+    assert.strictEqual(state('th-i').reason, 'interrupted');
+
+    replay([codexEvent('UserPromptSubmit', 'th-x'), codexEvent('SessionEnd', 'th-x', { reason: 'other' })], dir);
+    assert.ok(!fs.existsSync(path.join(dir, 'codex_th-x.json')), 'SessionEnd removes the session, never Done');
+
+    const sub = { agent_id: 'agent-2', agent_type: 'worker' };
+    replay([
+      codexEvent('UserPromptSubmit', 'th-m'),
+      codexEvent('SubagentStart', 'th-m', sub),
+      codexEvent('UserPromptSubmit', 'th-m', { ...sub, prompt: 'x' }),
+      codexEvent('PreToolUse', 'th-m', { ...sub, tool_name: 'exec_command' }),
+      codexEvent('SubagentStop', 'th-m', { ...sub, last_assistant_message: 'x' }),
+    ], dir);
+    assert.strictEqual(state('th-m').status, STATUS.COOKING, 'a subagent finishing leaves the parent Cooking');
+    replay([codexEvent('Stop', 'th-m'), codexEvent('PreToolUse', 'th-m', { ...sub, tool_name: 'exec_command' })], dir);
+    assert.strictEqual(state('th-m').status, STATUS.DONE, 'subagent activity after Stop does not revive the parent');
+    replay([codexEvent('PreToolUse', 'th-m', { tool_name: 'exec_command' })], dir);
+    assert.strictEqual(state('th-m').status, STATUS.COOKING, 'the main agent continuing (blocked Stop) leaves Done');
+  });
+}
+
 function testHookCommandAndConfig() {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'letitcook-codex-home-'));
   try {
@@ -126,6 +163,7 @@ function run() {
   testDetectionAndRegistration();
   testActivity();
   testPermissions();
+  testTurnEndingsAndSubagents();
   testHookCommandAndConfig();
   console.log('All LetItCook Codex CLI adapter tests passed.');
 }
