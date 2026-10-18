@@ -32,6 +32,9 @@ Two transports are available:
 
   It prints nothing and always exits 0, so it cannot break the caller. An invalid event is dropped. Use `node src/protocol/validate.js` (below) to see why.
 - **In-process (Node.js).** `src/protocol/sdk.js` builds events (ids, timestamps) and applies them in-process through the same code path.
+  - Each call returns `{ ok: true }` when LetItCook applied the event.
+  - Otherwise it returns `{ ok: false, error }`, with a schema error code, `ignored` (the rules above or an undeclared capability), `busy` (another writer held the lock) or `write_failed`.
+  - `requestOpened()` returns the request id only when the request was applied, and `null` otherwise. Do not treat a `null` request as shown.
 
 Both write through the shared hook bridge (`src/hooks/bridge.js`). It validates the event, takes the per-session lock, runs the shared lifecycle reducer and atomically writes the session file `@<agent>.<session_id>.json` in the private state directory. **The producer never chooses a path**, and the reserved `@` prefix cannot collide with native adapter files.
 
@@ -109,8 +112,10 @@ Events from one session may arrive late, twice or out of order, for example from
 1. **Duplicates.** An `event_id` seen among the session's last 64 events is ignored.
 2. **Turn correlation.** When events carry `turn_id`, a turn-ending event (`turn.completed`, `turn.failed`, `turn.cancelled`, `turn.ended`) or a `request.opened` for a turn other than the current one is ignored. A late completion of an earlier turn cannot mark the current one Done.
 3. **Late turn events.** A `turn.started` or turn-ending event whose `time` is earlier than the last applied one of those is ignored.
-4. **Requests.** A `request.resolved` that arrives before its `request.opened` is remembered, so the late opening is ignored. Activity never hides a waiting request.
-5. **Settled turns.** Done and Burn change only on a new `turn.started` or `request.opened`.
+4. **Events from before the turn ended.** Once the current turn has ended, a `request.opened` or `activity` whose `time` is earlier than that end is ignored. A late request cannot turn Done or Burn back into Your Turn, and late activity cannot turn an ended or cancelled turn (Your Turn) back into Cooking. Events sent after the end, and every event of a new turn, still apply.
+5. **Resumed sessions.** A `session.ended` whose `time` is earlier than the last applied `turn.started` or turn-ending event comes from an earlier run of the session. It is ignored, so it cannot remove a session the producer resumed. An end without a preceding turn still removes the session.
+6. **Requests.** A `request.resolved` that arrives before its `request.opened` is remembered, so the late opening is ignored. Activity never hides a waiting request. Request ids are ordinary keys: names such as `constructor` or `toString` behave like any other id.
+7. **Settled turns.** Done and Burn change only on a new `turn.started` or `request.opened`.
 
 `time` orders events; it never decides freshness. Staleness and retention use the receiving machine's clock at the moment each event is applied.
 
