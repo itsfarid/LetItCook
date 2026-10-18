@@ -6,7 +6,7 @@ GNOME Shell top-panel indicator: 🟡Cooking · 🟠Your Turn · 🟢Done · �
 LetItCook listens to agent events (OpenCode plugin hooks, Copilot CLI event logs) and writes normalized session state files to a shared state directory. The GNOME Shell extension reads these files to update the panel indicator and handle notifications.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Node.js](https://img.shields.io/badge/Node.js-&gt;=20.0.0-brightgreen.svg)](https://nodejs.org/)
+[![Node.js](https://img.shields.io/badge/Node.js-&gt;=20.3-brightgreen.svg)](https://nodejs.org/)
 [![GNOME](https://img.shields.io/badge/GNOME-42--47-blue.svg)](https://www.gnome.org/)
 
 ## What problem does LetItCook solve?
@@ -44,7 +44,7 @@ See [AGENTS.md §28](AGENTS.md#28-agent-adapter-status) for per-state reliabilit
 
 - **OS / Desktop**: Linux with GNOME Shell 42–47 (see [Project status](#project-status) for which versions have actually been tested)
 - **Agent CLI**: One of the supported agents must be installed
-- **Node.js**: Version 20.0.0 or later, needed for the Copilot sync bridge and for running tests (the OpenCode plugin runs inside OpenCode itself)
+- **Node.js**: Version 20.3 or later, needed for the Copilot sync bridge and for running tests (the OpenCode plugin runs inside OpenCode itself)
 
 Check your GNOME Shell version first; it decides which extension variant to install:
 
@@ -244,7 +244,7 @@ node src/notify.js --test          # - Send one manual test notification via not
 
 ```bash
 # Verify Node.js
-node --version  # Should be >= 20.0.0
+node --version  # Should be >= 20.3
 
 # Verify GNOME Shell (if testing directly)
 gnome-shell --version
