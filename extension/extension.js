@@ -27,6 +27,9 @@ const STATUS_META = Object.freeze({
 });
 
 const STALE_TIMEOUT_MS = 5 * 60 * 1000;
+// A session whose process is gone stays visible as Unknown for this long, then is
+// removed so dead sessions do not pin the panel at Unknown forever.
+const DEAD_SESSION_RETENTION_MS = 60 * 60 * 1000;
 const DEBOUNCE_DELAY_MS = 150;
 
 function formatElapsed(ms) {
@@ -254,6 +257,10 @@ class LetItCookButton extends PanelMenu.Button {
                                 // Process died unexpectedly -> mark Unknown (crash)
                                 stale = true;
                                 status = STATUS.UNKNOWN;
+                            }
+                            // Process gone and no update for the retention window -> remove (never Done)
+                            if (status === STATUS.UNKNOWN && now - updatedAt > DEAD_SESSION_RETENTION_MS) {
+                                terminated = true;
                             }
                         }
 

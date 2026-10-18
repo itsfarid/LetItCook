@@ -15,6 +15,9 @@ export const STATUS_META = Object.freeze({
 });
 
 export const DEFAULT_STALE_MS = 5 * 60 * 1000;
+// A session whose process is gone stays visible as Unknown for this long, then is
+// terminated so dead sessions do not pin the panel at Unknown forever.
+export const DEAD_SESSION_RETENTION_MS = 60 * 60 * 1000;
 
 export function isValidStatus(status) {
   return Object.values(STATUS).includes(status);
@@ -87,6 +90,9 @@ export function normalizeSession(raw, options = {}) {
     } else if (status === STATUS.COOKING || status === STATUS.YOUR_TURN) {
       stale = true;
       status = STATUS.UNKNOWN;
+    }
+    if (status === STATUS.UNKNOWN && now - updatedAt > DEAD_SESSION_RETENTION_MS) {
+      terminated = true;
     }
   }
 
@@ -175,6 +181,7 @@ export default {
   STATUS,
   STATUS_META,
   DEFAULT_STALE_MS,
+  DEAD_SESSION_RETENTION_MS,
   isValidStatus,
   normalizeSession,
   aggregateState,

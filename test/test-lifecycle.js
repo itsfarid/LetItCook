@@ -214,6 +214,47 @@ function testFileSystemAutoPruning() {
   }
 }
 
+// Regression: dead-PID OpenCode sessions used to stay visible as Unknown forever
+// (observed: five 1-4 day old files pinned the panel at Unknown). A recently
+// crashed session must stay visible; one whose process is gone and that has had no
+// update for the retention window is terminated (never promoted to Done).
+function testDeadPidUnknownExpiresAfterRetention() {
+  const now = Date.now();
+  const dead = () => false;
+  const alive = () => true;
+  const hour = 60 * 60 * 1000;
+
+  for (const status of [STATUS.COOKING, STATUS.YOUR_TURN, STATUS.UNKNOWN]) {
+    const recent = normalizeSession({ session_id: `r_${status}`, status, pid: 999, updated_at: now - 10 * 60 * 1000 }, { now, isPidAlive: dead });
+    assert.strictEqual(recent.status, STATUS.UNKNOWN, `${status}: recent dead session shows Unknown`);
+    assert.strictEqual(recent.terminated, false, `${status}: recent dead session stays visible`);
+
+    const old = normalizeSession({ session_id: `o_${status}`, status, pid: 999, updated_at: now - hour - 1000 }, { now, isPidAlive: dead });
+    assert.strictEqual(old.status, STATUS.UNKNOWN, `${status}: expired dead session is never Done`);
+    assert.strictEqual(old.terminated, true, `${status}: expired dead session is terminated`);
+
+    const oldAlive = normalizeSession({ session_id: `a_${status}`, status, pid: 999, updated_at: now - 5 * hour }, { now, isPidAlive: alive });
+    assert.strictEqual(oldAlive.terminated, false, `${status}: live process is never expired`);
+  }
+
+  // Without a PID (Copilot) or without a liveness probe nothing is expired here.
+  const noPid = normalizeSession({ session_id: 'np', status: STATUS.UNKNOWN, updated_at: now - 5 * hour }, { now, isPidAlive: dead });
+  assert.strictEqual(noPid.terminated, false, 'PID-less sessions are not expired by liveness');
+  const noProbe = normalizeSession({ session_id: 'nq', status: STATUS.UNKNOWN, pid: 999, updated_at: now - 5 * hour }, { now });
+  assert.strictEqual(noProbe.terminated, false, 'no liveness probe => no expiry');
+
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'letitcook_expire_'));
+  try {
+    writeSessionFile({ session_id: 'ses_old_dead', agent: 'opencode', status: STATUS.UNKNOWN, pid: 999, updated_at: now - 2 * hour }, tmpDir);
+    writeSessionFile({ session_id: 'ses_new_dead', agent: 'opencode', status: STATUS.COOKING, pid: 999, updated_at: now - 60 * 1000 }, tmpDir);
+    const active = readAllSessionsFromDir(tmpDir, { now, isPidAlive: dead });
+    assert.deepStrictEqual(active.map(s => s.session_id), ['ses_new_dead'], 'only the recent crash remains');
+    assert.strictEqual(fs.existsSync(path.join(tmpDir, 'ses_old_dead.json')), false, 'expired file cleaned');
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+}
+
 function run() {
   testDoneSessionStaysWhilePidAlive();
   testDoneSessionTerminatedWhenPidDies();
@@ -221,6 +262,7 @@ function run() {
   testCookingCrashBecomesUnknown();
   testMultiSessionStepwiseLifecycle();
   testFileSystemAutoPruning();
+  testDeadPidUnknownExpiresAfterRetention();
   console.log('All LetItCook lifecycle tests passed.');
 }
 
