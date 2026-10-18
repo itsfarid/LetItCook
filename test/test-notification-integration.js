@@ -575,6 +575,32 @@ function testCliProcessIsReadOnlyAndDispatchTest() {
     assert.strictEqual(testOut.sent, false);
     assert.strictEqual(testOut.payload.urgency, 'critical');
     assert.deepStrictEqual(snapshot(cachePath), before);
+
+    // Regression: real notify-send only accepts low|normal|critical and exits 1 on the
+    // Your Turn payload urgency 'high', so `--test` (default: your_turn) reported sent:false.
+    // A fake notify-send with the same validation records what the CLI passes.
+    const fakeBin = path.join(tmpDir, 'fakebin');
+    const argsLog = path.join(tmpDir, 'notify-send.args');
+    fs.mkdirSync(fakeBin);
+    fs.writeFileSync(path.join(fakeBin, 'notify-send'), [
+      '#!/bin/sh',
+      'prev=""',
+      'for a in "$@"; do',
+      '  if [ "$prev" = "-u" ]; then case "$a" in low|normal|critical) ;; *) exit 1 ;; esac; fi',
+      '  prev="$a"',
+      'done',
+      `printf '%s\\n' "$*" >> '${argsLog}'`,
+      '',
+    ].join('\n'), { mode: 0o755 });
+    for (const [args, urgency] of [[['--test'], 'normal'], [['--test', STATUS.YOUR_TURN], 'normal'], [['--test', STATUS.BURN], 'critical'], [['--test', STATUS.DONE], 'normal']]) {
+      const out = JSON.parse(execFileSync(process.execPath, [notifyScript, ...args], {
+        encoding: 'utf8', env: { ...env, PATH: fakeBin },
+      }));
+      assert.strictEqual(out.sent, true, `${args.join(' ')}: notify-send accepted the urgency`);
+      const lastCall = fs.readFileSync(argsLog, 'utf8').trim().split('\n').pop();
+      assert.ok(lastCall.endsWith(`-u ${urgency}`), `${args.join(' ')}: passes -u ${urgency} (got: ${lastCall})`);
+    }
+    assert.deepStrictEqual(snapshot(cachePath), before, 'manual tests never touch the cache');
   } finally {
     fs.rmSync(tmpDir, { recursive: true, force: true });
   }
