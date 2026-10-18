@@ -146,6 +146,72 @@ function testActivityAndIdentity() {
   }
 }
 
+function testPermissionsAndQuestions() {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'letitcook-claude-perm-'));
+  const status = sid => new ClaudeAdapter().getSessionState(sid, { baseDir: dir });
+  try {
+    const bash = { tool_name: 'Bash', tool_input: { command: 'npm test' } };
+    replay([
+      claudeEvent('UserPromptSubmit', 'p1'),
+      claudeEvent('PreToolUse', 'p1', { ...bash, tool_use_id: 'toolu_1' }),
+      claudeEvent('PermissionRequest', 'p1', bash),
+    ], dir);
+    assert.strictEqual(status('p1').status, STATUS.YOUR_TURN);
+    assert.strictEqual(status('p1').reason, 'permission:Bash', 'the reason names the tool, never the command');
+
+    // Other work (e.g. a parallel subagent) does not hide the waiting permission.
+    replay([
+      claudeEvent('PreToolUse', 'p1', { tool_name: 'Read', tool_use_id: 'toolu_9', tool_input: { file_path: '/x' }, agent_id: 'agent-1' }),
+      claudeEvent('PostToolUse', 'p1', { tool_name: 'Read', tool_use_id: 'toolu_9', tool_input: { file_path: '/x' }, agent_id: 'agent-1' }),
+    ], dir);
+    assert.strictEqual(status('p1').status, STATUS.YOUR_TURN, 'unrelated activity keeps Your Turn');
+
+    // Approved: the tool runs and its PostToolUse resolves the request.
+    replay([claudeEvent('PostToolUse', 'p1', { ...bash, tool_use_id: 'toolu_1', tool_response: {} })], dir);
+    assert.strictEqual(status('p1').status, STATUS.COOKING);
+
+    // The identical command asking again is shown again.
+    replay([claudeEvent('PreToolUse', 'p1', { ...bash, tool_use_id: 'toolu_2' }), claudeEvent('PermissionRequest', 'p1', bash)], dir);
+    assert.strictEqual(status('p1').status, STATUS.YOUR_TURN, 'an identical later request is not suppressed');
+    replay([claudeEvent('PostToolUseFailure', 'p1', { ...bash, tool_use_id: 'toolu_2', error: 'exit 1' })], dir);
+    assert.strictEqual(status('p1').status, STATUS.COOKING, 'a failing approved tool resolves its request too');
+
+    // Denied in auto mode.
+    replay([claudeEvent('PermissionRequest', 'p1', bash), claudeEvent('PermissionDenied', 'p1', { ...bash, tool_use_id: 'toolu_3' })], dir);
+    assert.strictEqual(status('p1').status, STATUS.COOKING);
+
+    // Denied by the user ("No, tell Claude what to do differently"): the turn stops and the
+    // request stays shown until the user's next prompt.
+    replay([claudeEvent('PermissionRequest', 'p1', bash)], dir);
+    assert.strictEqual(status('p1').status, STATUS.YOUR_TURN);
+    replay([claudeEvent('UserPromptSubmit', 'p1')], dir);
+    assert.strictEqual(status('p1').status, STATUS.COOKING, 'the next prompt clears it');
+
+    // AskUserQuestion: Your Turn while the question is shown.
+    const ask = { tool_name: 'AskUserQuestion', tool_use_id: 'toolu_q', tool_input: { questions: [{ question: 'secret?' }] } };
+    replay([claudeEvent('PreToolUse', 'p1', ask)], dir);
+    assert.strictEqual(status('p1').status, STATUS.YOUR_TURN);
+    assert.strictEqual(status('p1').reason, 'question');
+    replay([claudeEvent('PostToolUse', 'p1', { ...ask, tool_response: { answers: {} } })], dir);
+    assert.strictEqual(status('p1').status, STATUS.COOKING);
+
+    // MCP elicitation.
+    replay([claudeEvent('Elicitation', 'p1', { mcp_server_name: 'github', elicitation_id: 'e1', message: 'secret' })], dir);
+    assert.strictEqual(status('p1').status, STATUS.YOUR_TURN);
+    assert.strictEqual(status('p1').reason, 'elicitation:github');
+    replay([claudeEvent('ElicitationResult', 'p1', { mcp_server_name: 'github', elicitation_id: 'e1', action: 'accept' })], dir);
+    assert.strictEqual(status('p1').status, STATUS.COOKING);
+
+    // Long names never truncate the request id's digest.
+    const long = { tool_name: 'mcp__' + 'x'.repeat(200), agent_id: 'a'.repeat(200) };
+    const ids = [{ q: 1 }, { q: 2 }].map(tool_input => claudeHooks.toSignals(claudeEvent('PermissionRequest', 's', { ...long, tool_input }))[0].requestId);
+    assert.notStrictEqual(ids[0], ids[1]);
+    assert.ok(ids.every(id => id.length <= 128));
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+}
+
 function testHookCommandEndToEnd() {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'letitcook-claude-e2e-'));
   try {
@@ -167,6 +233,7 @@ function run() {
   testHookCommandIsAPureObserver();
   testIgnoresMalformedInput();
   testActivityAndIdentity();
+  testPermissionsAndQuestions();
   testHookCommandEndToEnd();
   console.log('All LetItCook Claude Code adapter tests passed.');
 }
