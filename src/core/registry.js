@@ -3,6 +3,7 @@ import { CopilotAdapter } from '../adapters/copilot/adapter.js';
 import { ClaudeAdapter } from '../adapters/claude/hooks.js';
 import { CodexAdapter } from '../adapters/codex/hooks.js';
 import { GeminiAdapter } from '../adapters/gemini/hooks.js';
+import { ProtocolAdapter } from '../protocol/adapter.js';
 import { aggregateState } from './status.js';
 
 export class AdapterRegistry {
@@ -80,6 +81,7 @@ export function createDefaultRegistry() {
   registry.register(new ClaudeAdapter());
   registry.register(new CodexAdapter());
   registry.register(new GeminiAdapter());
+  registry.register(new ProtocolAdapter());
   return registry;
 }
 

@@ -4,7 +4,7 @@
   "description": "Attention indicator for AI coding agents",
   "type": "module",
   "scripts": {
-    "test": "node test/test-state.js && node test/test-base-adapter.js && node test/test-lifecycle-contract.js && node test/test-hook-bridge.js && node test/test-adapter-conformance.js && node test/test-protocol.js && node test/test-copilot.js && node test/test-claude.js && node test/test-codex.js && node test/test-gemini.js && node test/test-integration.js && node test/test-plugin.js && node test/test-performance.js && node test/test-lifecycle.js && node test/test-notification.js && node test/test-notification-integration.js && node test/test-filesystem-hardening.js && node test/test-extension-compatibility.js && node test/test-selftest.js",
+    "test": "node test/test-state.js && node test/test-base-adapter.js && node test/test-lifecycle-contract.js && node test/test-hook-bridge.js && node test/test-adapter-conformance.js && node test/test-protocol.js && node test/test-protocol-adapter.js && node test/test-copilot.js && node test/test-claude.js && node test/test-codex.js && node test/test-gemini.js && node test/test-integration.js && node test/test-plugin.js && node test/test-performance.js && node test/test-lifecycle.js && node test/test-notification.js && node test/test-notification-integration.js && node test/test-filesystem-hardening.js && node test/test-extension-compatibility.js && node test/test-selftest.js",
     "sync": "node src/sync.js",
     "notify": "node src/notify.js",
     "selftest": "node src/selftest.js"
