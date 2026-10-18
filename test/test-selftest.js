@@ -188,6 +188,20 @@ async function testSuccessPathCleansUp() {
   }
 }
 
+// The CLI summary never reports skipped checks as passed.
+async function testSummaryNamesSkippedChecks() {
+  const sandbox = makeSandbox('summary', 'success');
+  try {
+    const run = await runCli(sandbox, { trigger: async () => {} });
+    assert.deepStrictEqual(run.exit, { code: 0, signal: null }, run.output);
+    assert.ok(run.output.includes('No check failed; 2 not performed: Your Turn popup, Done popup.'), run.output);
+    assert.ok(!run.output.includes('All checks passed.'), 'skips are not reported as all passed');
+    sandbox.assertCleaned('summary');
+  } finally {
+    sandbox.dispose();
+  }
+}
+
 async function testStartupTimeoutCleansUp() {
   const sandbox = makeSandbox('startup-timeout', 'slow-start');
   try {
@@ -354,6 +368,7 @@ async function run() {
   testHelpAndBadArguments();
   testFailurePathsCleanUp();
   await testSuccessPathCleansUp();
+  await testSummaryNamesSkippedChecks();
   await testStartupTimeoutCleansUp();
   await testRequestTimeoutCleansUp();
   await testSignalsCleanUp();
