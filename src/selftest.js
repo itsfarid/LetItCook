@@ -475,7 +475,10 @@ Options:
   }
   const results = await runSelftest(opts);
   const failed = results.filter(result => result.outcome === 'FAIL').length;
-  console.log(failed === 0 ? 'All checks passed.' : `${failed} check(s) failed.`);
+  const skipped = results.filter(result => result.outcome === 'SKIP').map(result => result.step);
+  if (failed > 0) console.log(`${failed} check(s) failed.`);
+  else if (skipped.length > 0) console.log(`No check failed; ${skipped.length} not performed: ${skipped.join(', ')}.`);
+  else console.log('All checks passed.');
   process.exit(failed === 0 ? 0 : 1);
 }
 
