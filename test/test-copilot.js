@@ -295,6 +295,8 @@ function testCopilotSyncFreshness() {
       { type: 'session.task_complete', data: { success: true, summary: 'old' } });
     // Stale Cooking (10 min, default staleMs 5min) -> skipped
     mkSession('stale_cooking', 10 * 60 * 1000, null);
+    // Your Turn left 3h ago (no shutdown, e.g. killed terminal) -> skipped
+    mkSession('ancient_turn_end', 3 * 60 * 60 * 1000, { type: 'assistant.turn_end', data: {} });
 
     const adapter = new CopilotAdapter();
     const synced = adapter.syncToStateDir(tmpState, { copilotDir: tmpCopilot, now });
@@ -302,6 +304,7 @@ function testCopilotSyncFreshness() {
     assert.ok(ids.includes('recent_done'), 'recent Done is synced');
     assert.ok(!ids.includes('ancient_done'), 'ancient Done is skipped');
     assert.ok(!ids.includes('stale_cooking'), 'stale Cooking is skipped');
+    assert.ok(!ids.includes('ancient_turn_end'), 'Your Turn older than maxAgeMs is skipped');
     assert.ok(fs.existsSync(path.join(tmpState, 'copilot_recent_done.json')));
     assert.ok(!fs.existsSync(path.join(tmpState, 'copilot_ancient_done.json')));
   } finally {

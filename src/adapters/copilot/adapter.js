@@ -390,14 +390,17 @@ export class CopilotAdapter extends BaseAdapter {
 
     // Freshness policy: only sync sessions worth glancing at.
     // - stale sessions (too old to trust) are never written
-    // - settled sessions (Done/Burn/Unknown) older than maxAgeMs are skipped
-    //   so months-old history does not clog the panel menu forever
+    // - sessions other than Cooking whose last event is older than maxAgeMs are
+    //   skipped so months-old history does not clog the panel menu forever. This
+    //   includes Your Turn: Copilot ends every turn with Your Turn and records no
+    //   process id, so a session closed without `session.shutdown` (for example a
+    //   killed terminal) would otherwise stay Your Turn indefinitely.
     const now = options.now || Date.now();
     const maxAgeMs = options.maxAgeMs || 60 * 60 * 1000;
     const live = sessions.filter(s => {
       if (!isValidSessionId(s.session_id)) return false;
       if (s.stale) return false;
-      if (s.status !== STATUS.COOKING && s.status !== STATUS.YOUR_TURN) {
+      if (s.status !== STATUS.COOKING) {
         return (now - s.updated_at) <= maxAgeMs;
       }
       return true;
