@@ -349,7 +349,7 @@ export function writeSessionFile(session, baseDir) {
   // Completion bookkeeping is process-local and must not leak into the normalized state file.
   const { _lastUserMessageId, _toolMessageIds, _completionCandidate, _pendingRequests, ...persistedSession } = session;
   // ponytail: atomic rename on POSIX, upgrade to lockfile if cross-device issues occur
-  fs.writeFileSync(tmpPath, JSON.stringify(persistedSession, null, 2), 'utf8');
+  fs.writeFileSync(tmpPath, JSON.stringify(persistedSession, null, 2), { encoding: 'utf8', mode: 0o600 });
   fs.renameSync(tmpPath, filePath);
   writeCounter++;
 }
