@@ -508,6 +508,53 @@ function testForeignStateDirIsRefused() {
   }
 }
 
+// L12 (extension): an untrusted state directory is reported and never read or cleaned.
+function loadExtensionEnsurePrivateDir(target, { owner, type = 'dir', mode = 0o700, throws = false }) {
+  const code = fs.readFileSync(path.resolve(`${target}/extension.js`), 'utf8');
+  const match = code.match(/\nfunction ensurePrivateDir\(path\) \{[\s\S]*?\n\}\n/);
+  assert.ok(match, `${target}: ensurePrivateDir not found`);
+  const chmods = [];
+  const info = {
+    get_file_type: () => (type === 'dir' ? 2 : 1),
+    has_attribute: () => true,
+    get_attribute_string: () => owner,
+    get_attribute_uint32: () => mode,
+  };
+  const Gio = {
+    FileQueryInfoFlags: { NOFOLLOW_SYMLINKS: 1 },
+    FileType: { DIRECTORY: 2 },
+    File: { new_for_path: () => ({
+      query_info: () => { if (throws) throw new Error('query failed'); return info; },
+      set_attribute_uint32: (a, m) => { chmods.push(m); return true; },
+    }) },
+  };
+  const GLib = { get_user_name: () => 'me' };
+  const fn = new Function('Gio', 'GLib', 'console', 'log', `${match[0]}; return ensurePrivateDir;`)(Gio, GLib, { error() {} }, () => {});
+  return { fn, chmods };
+}
+
+function testExtensionRefusesForeignStateDir() {
+  for (const target of ['extension', 'extension-legacy']) {
+    let t = loadExtensionEnsurePrivateDir(target, { owner: 'someone-else' });
+    assert.strictEqual(t.fn('/x'), false, `${target}: foreign directory is untrusted`);
+    assert.deepStrictEqual(t.chmods, [], `${target}: foreign directory not chmod-ed`);
+    assert.strictEqual(loadExtensionEnsurePrivateDir(target, { owner: 'me', type: 'file' }).fn('/x'), false, `${target}: non-directory untrusted`);
+    assert.strictEqual(loadExtensionEnsurePrivateDir(target, { owner: 'me', throws: true }).fn('/x'), false, `${target}: unreadable metadata untrusted`);
+    assert.strictEqual(loadExtensionEnsurePrivateDir(target, { owner: 'me' }).fn('/x'), true, `${target}: own private directory trusted`);
+    t = loadExtensionEnsurePrivateDir(target, { owner: 'me', mode: 0o755 });
+    assert.strictEqual(t.fn('/x'), true, `${target}: own broad directory trusted`);
+    assert.deepStrictEqual(t.chmods, [0o700], `${target}: own broad directory tightened`);
+
+    const load = loadReadSessions(target);
+    const { Gio, GLib, state } = makeFakeGio({ files: ['a.json'] });
+    const { fn } = load(Gio, GLib);
+    assert.deepStrictEqual(fn.call({ _stateDir: '/fake', _stateDirTrusted: false }), [], `${target}: untrusted dir yields no sessions`);
+    assert.deepStrictEqual(state, { opened: 0, closed: 0 }, `${target}: untrusted dir is not even enumerated`);
+    const code = fs.readFileSync(path.resolve(`${target}/extension.js`), 'utf8');
+    assert.ok(code.includes('this._stateDirTrusted = parentTrusted && dirTrusted;'), `${target}: trust decided at startup`);
+  }
+}
+
 function run() {
   testSessionIdValidator();
   testOpenCodeRejectsTraversal();
@@ -521,6 +568,7 @@ function run() {
   testSymlinkedSessionFilesAreIgnored();
   testPruneKeepsFileRewrittenAfterRead();
   testForeignStateDirIsRefused();
+  testExtensionRefusesForeignStateDir();
   testExtensionEnumeratorCleanup();
   testExtensionStateDirPermissionsSource();
   console.log('All LetItCook filesystem hardening tests passed.');

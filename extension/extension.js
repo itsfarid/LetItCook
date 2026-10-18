@@ -186,6 +186,8 @@ function formatSessionRow(s, meta, elapsed) {
 
 // Restrict a LetItCook-owned directory to owner-only (0700), querying and
 // setting attributes with NOFOLLOW_SYMLINKS so a link is never chmod-ed by path.
+// Returns false when `path` is not a directory owned by the current user, so the
+// caller never reads or deletes session files someone else controls.
 function ensurePrivateDir(path) {
     try {
         const dirFile = Gio.File.new_for_path(path);
@@ -196,20 +198,22 @@ function ensurePrivateDir(path) {
             !info.has_attribute('unix::mode') ||
             !info.has_attribute('owner::user') ||
             info.get_attribute_string('owner::user') !== GLib.get_user_name())
-            return;
+            return false;
         if ((info.get_attribute_uint32('unix::mode') & 0o777) === 0o700)
-            return;
+            return true;
         if (!dirFile.set_attribute_uint32('unix::mode', 0o700, flags, null)) {
             console.error(`[LetItCook] Could not restrict permissions on ${path}`);
-            return;
+            return true;
         }
         const secured = dirFile.query_info(attrs, flags, null);
         if (secured.get_file_type() !== Gio.FileType.DIRECTORY ||
             secured.get_attribute_string('owner::user') !== GLib.get_user_name() ||
             (secured.get_attribute_uint32('unix::mode') & 0o777) !== 0o700)
             console.error(`[LetItCook] Could not verify private permissions on ${path}`);
+        return true;
     } catch (e) {
         console.error(`[LetItCook] Could not restrict permissions on ${path}: ${e}`);
+        return false;
     }
 }
 
@@ -263,8 +267,11 @@ class LetItCookButton extends PanelMenu.Button {
         GLib.mkdir_with_parents(this._stateDir, 0o700);
         // Correct pre-existing directories created with broader permissions.
         // Only LetItCook's own two directories are touched, never their parents.
-        ensurePrivateDir(GLib.path_get_dirname(this._stateDir));
-        ensurePrivateDir(this._stateDir);
+        const parentTrusted = ensurePrivateDir(GLib.path_get_dirname(this._stateDir));
+        const dirTrusted = ensurePrivateDir(this._stateDir);
+        this._stateDirTrusted = parentTrusted && dirTrusted;
+        if (!this._stateDirTrusted)
+            console.error(`[LetItCook] Not reading ${this._stateDir}: it is not a directory owned by you`);
 
         this._container = new St.BoxLayout({
             style_class: 'letitcook-panel-box',
@@ -343,6 +350,8 @@ class LetItCookButton extends PanelMenu.Button {
 
     _readSessions() {
         const sessions = [];
+        if (this._stateDirTrusted === false)
+            return sessions;
         const dirFile = Gio.File.new_for_path(this._stateDir);
 
         let enumerator = null;
