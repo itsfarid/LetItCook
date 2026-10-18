@@ -35,11 +35,26 @@ const PROMPT = [
 ].join('\n');
 
 const POLL_MS = 100;
-const STARTUP_TIMEOUT_MS = 30 * 1000;
-const AGENT_TIMEOUT_MS = 3 * 60 * 1000;
-const NOTIFY_TIMEOUT_MS = 5 * 1000;
+const DEFAULT_TIMEOUTS = Object.freeze({
+  startup: 30 * 1000,
+  request: 15 * 1000,
+  agent: 3 * 60 * 1000,
+  notify: 5 * 1000,
+  // Bounded shutdown: session cleanup requests, then SIGTERM grace before SIGKILL.
+  cleanupRequests: 3 * 1000,
+  killGrace: 3 * 1000,
+});
+// Exit codes for an interrupted run, as a shell reports a process killed by the signal.
+const SIGNAL_EXIT_CODES = Object.freeze({ SIGINT: 130, SIGTERM: 143 });
 
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+
+// Wait for `promise` at most `ms`, without leaving the timer armed afterwards.
+function withinBudget(promise, ms) {
+  let timer;
+  return Promise.race([promise, new Promise(resolve => { timer = setTimeout(resolve, ms); })])
+    .finally(() => clearTimeout(timer));
+}
 
 export function parseModel(value) {
   if (typeof value !== 'string') return null;
@@ -116,7 +131,8 @@ function readNotifyCache(cachePath) {
   }
 }
 
-function startServer(bin, cwd, password) {
+// `onSpawn` receives the child immediately, so an interruption during startup can stop it.
+function startServer(bin, cwd, password, timeoutMs, onSpawn) {
   return new Promise((resolve, reject) => {
     const child = spawn(bin, ['serve', '--hostname', '127.0.0.1', '--port', '0'], {
       cwd,
@@ -124,9 +140,10 @@ function startServer(bin, cwd, password) {
       stdio: ['ignore', 'pipe', 'pipe'],
       detached: true,
     });
+    onSpawn(child);
     let output = '';
     let started = false;
-    const timer = setTimeout(() => fail(new Error('opencode serve did not start within 30s')), STARTUP_TIMEOUT_MS);
+    const timer = setTimeout(() => fail(new Error(`opencode serve did not start within ${Math.round(timeoutMs / 1000)}s`)), timeoutMs);
     const fail = (error) => { clearTimeout(timer); reject(Object.assign(error, { child })); };
     child.on('error', error => fail(new Error(`Could not start opencode (${bin}): ${error.message}`)));
     child.on('exit', code => fail(new Error(`opencode serve exited early (code ${code}): ${summarizeReason(output)}`)));
@@ -147,20 +164,37 @@ function startServer(bin, cwd, password) {
   });
 }
 
-function stopServer(child) {
-  if (!child || !child.pid || child.exitCode !== null) return Promise.resolve();
+// The server runs in its own process group (detached), so only that group is signalled;
+// other OpenCode processes are never touched.
+function killServerGroup(child, signal) {
+  if (!child || !child.pid) return;
+  try { process.kill(-child.pid, signal); } catch {}
+}
+
+function stopServer(child, graceMs) {
+  if (!child || !child.pid) return Promise.resolve();
+  if (child.exitCode !== null || child.signalCode !== null) {
+    killServerGroup(child, 'SIGTERM'); // leftover group members, if any
+    return Promise.resolve();
+  }
   return new Promise((resolve) => {
-    const kill = signal => { try { process.kill(-child.pid, signal); } catch {} };
-    const timer = setTimeout(() => { kill('SIGKILL'); resolve(); }, 3000);
-    child.once('exit', () => { clearTimeout(timer); resolve(); });
-    kill('SIGTERM');
+    let forced = null;
+    const timer = setTimeout(() => {
+      killServerGroup(child, 'SIGKILL');
+      forced = setTimeout(resolve, 1000); // SIGKILL cannot be ignored; just bound the wait
+    }, graceMs);
+    child.once('exit', () => { clearTimeout(timer); clearTimeout(forced); resolve(); });
+    killServerGroup(child, 'SIGTERM');
   });
 }
 
 export async function runSelftest(opts = {}) {
   const log = opts.log || console.log;
+  const timeouts = { ...DEFAULT_TIMEOUTS, ...(opts.timeouts || {}) };
   const results = [];
+  let interrupted = null;
   const record = (step, outcome, detail = '') => {
+    if (interrupted) return; // the run is being torn down; later steps are meaningless
     results.push({ step, outcome, detail });
     log(`[${results.length}] ${`${step} `.padEnd(26, '.')} ${outcome.padEnd(4)}  ${detail}`);
   };
@@ -177,27 +211,21 @@ export async function runSelftest(opts = {}) {
   const cachePath = getCachePath();
   const password = randomBytes(24).toString('hex');
   const auth = `Basic ${Buffer.from(`opencode:${password}`).toString('base64')}`;
-  const project = fs.mkdtempSync(path.join(os.tmpdir(), 'letitcook-selftest-'));
-  fs.writeFileSync(path.join(project, 'opencode.json'), JSON.stringify({
-    $schema: 'https://opencode.ai/config.json',
-    permission: { bash: 'ask', edit: 'deny', webfetch: 'deny' },
-  }, null, 2));
 
-  log(`LetItCook self-test (model: ${model ? `${model.providerID}/${model.modelID}` : 'default'}, ${source})`);
-  log(`State dir: ${stateDir}`);
-
+  // Everything this run creates; cleanup releases exactly these and nothing else.
+  let project = null;
   let server = null;
   let url = null;
   let sid = null;
   const history = [];
   let recorder = null;
 
-  const api = async (method, route, body) => {
+  const api = async (method, route, body, timeoutMs = timeouts.request) => {
     const response = await fetch(url + route, {
       method,
       headers: { authorization: auth, 'content-type': 'application/json' },
       body: body === undefined ? undefined : JSON.stringify(body),
-      signal: AbortSignal.timeout(15000),
+      signal: AbortSignal.timeout(timeoutMs),
     });
     const text = await response.text();
     let json = null;
@@ -205,8 +233,8 @@ export async function runSelftest(opts = {}) {
     if (!response.ok) throw new Error(`${method} ${route} -> HTTP ${response.status}`);
     return json;
   };
-  const pendingRequests = async () => {
-    const list = await api('GET', '/permission');
+  const pendingRequests = async (timeoutMs) => {
+    const list = await api('GET', '/permission', undefined, timeoutMs);
     return Array.isArray(list) ? list.filter(request => request.sessionID === sid) : [];
   };
   const readState = () => {
@@ -227,6 +255,9 @@ export async function runSelftest(opts = {}) {
   const askUser = async (question) => {
     if (!opts.ask || !process.stdin.isTTY) return null;
     const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+    // In a terminal, readline turns Ctrl+C into an event instead of a signal; treat it
+    // as the same interruption so cleanup and the exit code match a real SIGINT.
+    rl.on('SIGINT', () => onSignal('SIGINT'));
     try {
       return /^y/i.test((await rl.question(`    ${question} [y/n] `)).trim());
     } finally {
@@ -239,8 +270,62 @@ export async function runSelftest(opts = {}) {
     else record(label, seen ? 'PASS' : 'FAIL', seen ? 'you saw it' : 'you did not see it (check Do Not Disturb)');
   };
 
+  // Idempotent: a signal, the normal finally block or both share one cleanup run.
+  // Session requests are bounded by a short budget so shutdown never hangs.
+  let cleaning = null;
+  const cleanup = () => cleaning ??= (async () => {
+    if (recorder) clearInterval(recorder);
+    if (sid && url) {
+      const removeSession = async () => {
+        try {
+          for (const extra of await pendingRequests(timeouts.cleanupRequests)) {
+            await api('POST', `/permission/${extra.id}/reply`, { reply: 'reject' }, timeouts.cleanupRequests);
+          }
+        } catch {}
+        try { await api('POST', `/session/${sid}/abort`, undefined, timeouts.cleanupRequests); } catch {}
+        try { await api('DELETE', `/session/${sid}`, undefined, timeouts.cleanupRequests); } catch {}
+        await sleep(500);
+      };
+      await withinBudget(removeSession(), timeouts.cleanupRequests);
+      try { fs.unlinkSync(path.join(stateDir, `${sid}.json`)); } catch {}
+    }
+    await stopServer(server, timeouts.killGrace);
+    if (project) fs.rmSync(project, { recursive: true, force: true });
+    log('Cleaned up the test session, server and temporary project.');
+  })();
+
+  // Second signal while cleaning up: stop waiting, remove what can be removed synchronously.
+  const forceCleanup = () => {
+    if (recorder) clearInterval(recorder);
+    killServerGroup(server, 'SIGKILL');
+    if (sid) { try { fs.unlinkSync(path.join(stateDir, `${sid}.json`)); } catch {} }
+    if (project) fs.rmSync(project, { recursive: true, force: true });
+  };
+
+  function onSignal(signal) {
+    const exitCode = SIGNAL_EXIT_CODES[signal] ?? 1;
+    if (interrupted) {
+      forceCleanup();
+      process.exit(exitCode);
+    }
+    interrupted = signal;
+    log(`\nInterrupted (${signal}); cleaning up...`);
+    cleanup().finally(() => process.exit(exitCode));
+  }
+  process.on('SIGINT', onSignal);
+  process.on('SIGTERM', onSignal);
+
   try {
-    ({ child: server, url } = await startServer(resolveOpenCodeBin(), project, password));
+    project = fs.mkdtempSync(path.join(os.tmpdir(), 'letitcook-selftest-'));
+    fs.writeFileSync(path.join(project, 'opencode.json'), JSON.stringify({
+      $schema: 'https://opencode.ai/config.json',
+      permission: { bash: 'ask', edit: 'deny', webfetch: 'deny' },
+    }, null, 2));
+
+    log(`LetItCook self-test (model: ${model ? `${model.providerID}/${model.modelID}` : 'default'}, ${source})`);
+    log(`State dir: ${stateDir}`);
+
+    ({ url } = await startServer(resolveOpenCodeBin(), project, password, timeouts.startup, (child) => { server = child; }));
     const session = await api('POST', '/session', { title: 'LetItCook self-test' });
     sid = session && session.id;
     if (!isValidSessionId(sid)) throw new Error('OpenCode returned an invalid session id');
@@ -259,7 +344,7 @@ export async function runSelftest(opts = {}) {
     });
 
     // 1. Cooking
-    const cooking = await waitFor(() => history.find(entry => entry.status === 'cooking'), 60 * 1000);
+    const cooking = await waitFor(() => history.find(entry => entry.status === 'cooking'), Math.min(60 * 1000, timeouts.agent));
     if (!cooking) {
       record('Cooking', 'FAIL', history.length ? describe(current()) :
         'no state file written; is the LetItCook plugin listed in your OpenCode config?');
@@ -274,11 +359,11 @@ export async function runSelftest(opts = {}) {
       const pending = await pendingRequests();
       request = pending[0] || null;
       return request && current()?.status === 'your_turn' ? 'asked' : null;
-    }, AGENT_TIMEOUT_MS);
+    }, timeouts.agent);
     if (asked !== 'asked') {
       const detail = asked === 'burn'
         ? `${describe(current())}; check the model (--model provider/model)`
-        : `no permission request within ${AGENT_TIMEOUT_MS / 1000}s (last: ${describe(current())})`;
+        : `no permission request within ${timeouts.agent / 1000}s (last: ${describe(current())})`;
       record('Permission request', 'FAIL', detail);
       return results;
     }
@@ -294,7 +379,7 @@ export async function runSelftest(opts = {}) {
     const notified = await waitFor(() => {
       const entry = cacheEntry();
       return entry && entry.notifiedStatus === 'your_turn' && entry.notifiedAt >= askedAt - 1000 ? entry : null;
-    }, NOTIFY_TIMEOUT_MS);
+    }, timeouts.notify);
     record('Your Turn notification', notified ? 'PASS' : 'FAIL', notified
       ? `extension called Main.notify (+${Math.max(0, notified.notifiedAt - askedAt)} ms)`
       : 'extension recorded no notification; is it enabled? (gnome-extensions info letitcook@letitcook.local)');
@@ -317,11 +402,11 @@ export async function runSelftest(opts = {}) {
       }
       const entry = current();
       return entry && ['done', 'burn', 'unknown'].includes(entry.status) && entry.at > askedAt ? entry : null;
-    }, AGENT_TIMEOUT_MS);
+    }, timeouts.agent);
     const done = finished?.status === 'done';
     record('Done', done && !unexpected ? 'PASS' : 'FAIL', finished
       ? `${describe(finished)}${unexpected ? '; the model made extra requests (rejected)' : ''}`
-      : `not finished within ${AGENT_TIMEOUT_MS / 1000}s (last: ${describe(current())})`);
+      : `not finished within ${timeouts.agent / 1000}s (last: ${describe(current())})`);
 
     // 6. Done notification is opt-in
     if (!done) {
@@ -329,7 +414,7 @@ export async function runSelftest(opts = {}) {
     } else if (readNotifyCache(cachePath)?._config?.notifyDone !== true) {
       record('Done notification', 'SKIP', "'Notify on Done' is off (turn it on in the panel menu)");
     } else {
-      const doneNotified = await waitFor(() => cacheEntry()?.notifiedStatus === 'done', NOTIFY_TIMEOUT_MS);
+      const doneNotified = await waitFor(() => cacheEntry()?.notifiedStatus === 'done', timeouts.notify);
       record('Done notification', doneNotified ? 'PASS' : 'FAIL',
         doneNotified ? 'extension called Main.notify' : 'extension recorded no Done notification');
       if (doneNotified) await checkPopup('Done popup', "Did you see a 'LetItCook: opencode' Done popup?");
@@ -337,20 +422,11 @@ export async function runSelftest(opts = {}) {
     return results;
   } catch (error) {
     record('Self-test', 'FAIL', summarizeReason(error.message));
-    server = server || error.child || null;
     return results;
   } finally {
-    if (recorder) clearInterval(recorder);
-    if (sid && url) {
-      try { for (const extra of await pendingRequests()) await api('POST', `/permission/${extra.id}/reply`, { reply: 'reject' }); } catch {}
-      try { await api('POST', `/session/${sid}/abort`); } catch {}
-      try { await api('DELETE', `/session/${sid}`); } catch {}
-      await sleep(500);
-      try { fs.unlinkSync(path.join(stateDir, `${sid}.json`)); } catch {}
-    }
-    await stopServer(server);
-    fs.rmSync(project, { recursive: true, force: true });
-    log('Cleaned up the test session, server and temporary project.');
+    await cleanup();
+    process.off('SIGINT', onSignal);
+    process.off('SIGTERM', onSignal);
   }
 }
 
