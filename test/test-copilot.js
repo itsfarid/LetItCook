@@ -2,7 +2,7 @@ import assert from 'node:assert';
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
-import { STATUS } from '../src/core/status.js';
+import { STATUS, normalizeSession } from '../src/core/status.js';
 import {
   parseWorkspaceYaml,
   mapCopilotEvent,
@@ -181,6 +181,41 @@ function testCopilotEventMapping() {
   }, evToolBash);
   assert.strictEqual(evShutdownErr.terminated, true);
   assert.strictEqual(evShutdownErr.status, STATUS.BURN);
+}
+
+// Copilot runs tools in parallel: activity of another tool must not hide a permission
+// request, and resolving one of two requests keeps the other.
+function testPendingRequestsSurviveParallelActivity() {
+  const ev = (type, data = {}) => ({ type, data: { sessionId: 'par', ...data }, timestamp: new Date().toISOString() });
+  const replay = (events) => events.reduce((state, e) => mapCopilotEvent(e, state) || state, null);
+  const base = [
+    ev('assistant.turn_start'),
+    ev('permission.requested', { requestId: 'p1', permissionRequest: { kind: 'shell' } }),
+    ev('tool.execution_start', { toolCallId: 't2', toolName: 'view' }),
+    ev('tool.execution_progress', { toolCallId: 't2' }),
+    ev('tool.execution_complete', { toolCallId: 't2', toolName: 'view' }),
+  ];
+  const waiting = replay(base);
+  assert.strictEqual(waiting.status, STATUS.YOUR_TURN, 'parallel tool activity keeps the permission visible');
+  assert.strictEqual(waiting.reason, 'permission:shell');
+
+  const two = replay([...base, ev('permission.requested', { requestId: 'p2', permissionRequest: { kind: 'write' } }),
+    ev('permission.completed', { requestId: 'p2', result: { kind: 'approved' } })]);
+  assert.strictEqual(two.status, STATUS.YOUR_TURN, 'resolving one request keeps the other');
+  assert.strictEqual(two.reason, 'permission:shell');
+
+  const resolved = replay([...base, ev('permission.completed', { requestId: 'p1', result: { kind: 'approved' } })]);
+  assert.strictEqual(resolved.status, STATUS.COOKING, 'resolving the last request returns to Cooking');
+
+  const legacy = replay([...base, ev('permission.completed', {})]);
+  assert.strictEqual(legacy.status, STATUS.COOKING, 'a resolution without request id clears all');
+
+  for (const end of [ev('assistant.turn_end'), ev('abort', { reason: 'user initiated' }), ev('session.error', { errorType: 'quota' })]) {
+    const next = replay([...base, end, ev('assistant.turn_start')]);
+    assert.strictEqual(next.status, STATUS.COOKING, `${end.type} clears waiting requests`);
+  }
+  const normalized = normalizeSession(waiting, { now: waiting.updated_at });
+  assert.ok(!('_pendingRequests' in normalized), 'bookkeeping is not written to the state dir');
 }
 
 function testCopilotDirectoryReadingAndSync() {
@@ -374,6 +409,7 @@ function testReplayCacheTracksChanges() {
 function run() {
   testYamlParser();
   testCopilotEventMapping();
+  testPendingRequestsSurviveParallelActivity();
   testCopilotDirectoryReadingAndSync();
   testCopilotSyncFreshness();
   testReplayCacheTracksChanges();
