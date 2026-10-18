@@ -43,6 +43,18 @@ export function hasMeaningfulStateChange(prev, next) {
   );
 }
 
+// While OpenCode keeps emitting events for an active (Cooking / Your Turn) session without
+// a state change, e.g. output streaming from a long tool call, its file is rewritten at
+// most this often so `updated_at` keeps proving activity and the session does not go
+// stale. Without events nothing is written, so a silent agent still becomes Unknown.
+export const HEARTBEAT_MS = 60 * 1000;
+
+export function isHeartbeatDue(prev, next, intervalMs = HEARTBEAT_MS) {
+  if (!prev || !next) return false;
+  if (next.status !== STATUS.COOKING && next.status !== STATUS.YOUR_TURN) return false;
+  return typeof prev.updated_at === 'number' && next.updated_at - prev.updated_at >= intervalMs;
+}
+
 const REQUEST_ASKED = new Set(['permission.asked', 'permission.v2.asked', 'question.asked', 'question.v2.asked']);
 const REQUEST_ANSWERED = new Set([
   'permission.replied', 'permission.v2.replied',
@@ -485,6 +497,7 @@ export default {
   getWriteCount,
   resetWriteCount,
   hasMeaningfulStateChange,
+  isHeartbeatDue,
   extractSessionId,
   extractCwd,
   extractTitle,

@@ -5,7 +5,7 @@ import os from 'node:os';
 import { spawnSync } from 'node:child_process';
 import { pathToFileURL } from 'node:url';
 import { LetItCookPlugin } from '../src/adapters/opencode/plugin.js';
-import { STATUS, aggregateState } from '../src/core/status.js';
+import { STATUS, aggregateState, normalizeSession } from '../src/core/status.js';
 import { NotificationTracker } from '../src/core/notification.js';
 import { readAllSessionsFromDir, extractSessionId, mapOpenCodeEvent } from '../src/adapters/opencode/adapter.js';
 
@@ -163,6 +163,35 @@ async function testPendingPermissionRequestsKeepYourTurn() {
   await emit('message.updated', { info: completion });
   await emit('session.idle', { sessionID: 'late_dup' });
   assert.strictEqual(state('late_dup').status, STATUS.UNKNOWN, 'old completion never completes a new prompt');
+
+  // F13: while events keep arriving for an active session without a state change, the
+  // file is refreshed at most every HEARTBEAT_MS; settled sessions are not rewritten.
+  const realNow = Date.now;
+  let fakeNow = realNow();
+  Date.now = () => fakeNow;
+  try {
+    const part = sid => ({ part: { type: 'text', sessionID: sid, messageID: 'msg_hb' } });
+    await emit('message.updated', { info: { id: 'msg_hb_u', sessionID: 'heartbeat', role: 'user' } });
+    const firstWrite = state('heartbeat').updated_at;
+    fakeNow += 30 * 1000;
+    await emit('message.part.updated', part('heartbeat'));
+    assert.strictEqual(state('heartbeat').updated_at, firstWrite, 'no rewrite before the heartbeat interval');
+    fakeNow += 31 * 1000;
+    await emit('message.part.updated', part('heartbeat'));
+    assert.strictEqual(state('heartbeat').updated_at, fakeNow, 'active session refreshed after 60 s of events');
+    assert.strictEqual(state('heartbeat').status, STATUS.COOKING);
+    for (let i = 0; i < 6; i++) { fakeNow += 60 * 1000; await emit('message.part.updated', part('heartbeat')); }
+    const norm = normalizeSession(state('heartbeat'), { now: fakeNow, isPidAlive: () => true });
+    assert.strictEqual(norm.status, STATUS.COOKING, 'a 7-minute streaming step stays Cooking, not stale Unknown');
+
+    await emit('session.idle', { sessionID: 'heartbeat' }); // no completion evidence -> Unknown
+    const settled = state('heartbeat').updated_at;
+    fakeNow += 5 * 60 * 1000;
+    await emit('message.part.updated', part('heartbeat'));
+    assert.strictEqual(state('heartbeat').updated_at, settled, 'Unknown session is not refreshed');
+  } finally {
+    Date.now = realNow;
+  }
 
   // Malformed events (non-string type, missing properties) are ignored without throwing.
   const before = fs.readdirSync(dir).sort();

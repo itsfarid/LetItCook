@@ -163,7 +163,7 @@ These describe current behavior and have not all been confirmed in day-to-day us
 
 - **OpenCode, cancelled prompts**: cancelling a running prompt makes OpenCode emit `session.error` (`MessageAbortedError`), which LetItCook shows as `Burn` and notifies.
 - **OpenCode, subagents**: subagent (child) sessions are tracked as separate sessions and can show their own `Done`.
-- **OpenCode, long single steps**: the plugin only rewrites state when the state changes, so one tool call or response that runs longer than 5 minutes can show as `Unknown` until the next change.
+- **OpenCode, long single steps**: while OpenCode keeps emitting events (for example streamed tool output), the plugin refreshes the session at most once a minute, so it stays `Cooking`. A step that runs longer than 5 minutes *without any events* still shows as `Unknown` until the next change.
 - **Copilot CLI**: every `assistant.turn_end` maps to `Your Turn`, so each finished turn notifies. `Done` requires `session.task_complete`, which is rare.
 - **Copilot CLI**: state only updates while `node src/sync.js --watch` is running.
 
