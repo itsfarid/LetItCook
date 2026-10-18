@@ -14,6 +14,8 @@ export const geminiHooks = {
   name: 'Gemini CLI',
   bins: ['gemini'],
   binEnv: 'GEMINI_BIN',
+  // Outcomes it can report: requests only; AfterAgent has no outcome (turn_end).
+  capabilities: ['requests'],
   // Hook events LetItCook registers for. BeforeModel/AfterModel are left out: AfterModel
   // fires for every streamed chunk.
   events: ['BeforeAgent', 'BeforeTool', 'AfterTool', 'Notification', 'AfterAgent', 'SessionEnd'],

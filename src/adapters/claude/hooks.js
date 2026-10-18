@@ -22,6 +22,8 @@ export const claudeHooks = {
   name: 'Claude Code',
   bins: ['claude'],
   binEnv: 'CLAUDE_BIN',
+  // Outcomes it can report (src/core/lifecycle.js CAPABILITY): all of them.
+  capabilities: ['cancel', 'complete', 'fail', 'requests'],
   // Hook events LetItCook registers for.
   events: [
     'UserPromptSubmit', 'PreToolUse', 'PostToolUse', 'PostToolUseFailure',
