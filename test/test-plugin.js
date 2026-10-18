@@ -116,6 +116,16 @@ async function testPendingPermissionRequestsKeepYourTurn() {
   await emit('question.replied', { sessionID: 'pending_q', requestID: 'que_2', answers: [] });
   assert.strictEqual(state('pending_q').status, STATUS.COOKING, 'all questions answered');
 
+  // v2 question events: rejecting the last pending question resumes Cooking.
+  await emit('message.updated', { info: { id: 'u_q2', sessionID: 'pending_q2', role: 'user' } });
+  await emit('question.v2.asked', { id: 'que_v2_1', sessionID: 'pending_q2', questions: [] });
+  await emit('question.v2.asked', { id: 'que_v2_2', sessionID: 'pending_q2', questions: [] });
+  await emit('question.v2.rejected', { sessionID: 'pending_q2', requestID: 'que_v2_1' });
+  assert.strictEqual(state('pending_q2').status, STATUS.YOUR_TURN, 'v2: second question still pending');
+  await emit('question.v2.rejected', { sessionID: 'pending_q2', requestID: 'que_v2_2' });
+  assert.strictEqual(state('pending_q2').status, STATUS.COOKING, 'v2: last question rejected => Cooking');
+  assert.strictEqual(state('pending_q2').reason, 'question.v2.rejected:replied');
+
   // A missed reply can never pin Your Turn: the loop ending clears pending requests.
   await emit('message.updated', { info: { id: 'u_stuck', sessionID: 'pending_stuck', role: 'user' } });
   await emit('permission.asked', { id: 'per_lost', sessionID: 'pending_stuck', permission: 'bash', patterns: [] });
