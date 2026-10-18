@@ -170,7 +170,7 @@ function testDropdownMenuRetainsEmojis() {
 
     // Session items in dropdown must retain emoji
     assert.ok(
-      code.includes('${sMeta.emoji} [${s.agent}]'),
+      code.includes('${meta.emoji} [${agent}]') && code.includes('formatSessionRow(s, sMeta,'),
       `${target} session items must include status emoji`
     );
   }
@@ -378,7 +378,7 @@ function loadExtensionMethod(target, name, deps) {
 // Top-level notification helpers of a variant (shortCwd uses the real home directory).
 const NOTIFICATION_HELPERS = [
   'shortCwd', 'notificationFirstLine', 'boundNotificationText', 'openQuote', 'redactNotificationSecrets',
-  'cleanNotificationText', 'notificationReason', 'formatNotificationBody',
+  'cleanNotificationText', 'notificationReason', 'formatNotificationBody', 'formatSessionRow',
 ];
 function loadExtensionNotificationHelpers(target) {
   const code = fs.readFileSync(path.resolve(`${target}/extension.js`), 'utf8');
@@ -625,6 +625,27 @@ function testMalformedNotificationInputs() {
   }
 }
 
+// R2: dropdown rows use the same cleaning as popups.
+function testMenuRowsAreSanitized() {
+  const meta = { emoji: '🔴', label: 'Burn' };
+  for (const target of EXTENSION_TARGETS) {
+    const { formatSessionRow } = loadExtensionNotificationHelpers(target);
+    for (const status of [STATUS.YOUR_TURN, STATUS.BURN, STATUS.COOKING, STATUS.UNKNOWN]) {
+      for (const [label, reason] of SANITIZATION_CORPUS) {
+        const row = formatSessionRow({ agent: 'opencode\u202e', status, reason, title: 'line one\nline two', cwd: '/srv/app' }, meta, '5s ago');
+        const text = `${row.title}\n${row.subtitle}`;
+        assert.ok(!/[\u0000-\u0009\u000b-\u001f\u007f-\u009f\u202e]/.test(text), `${target} ${status} ${label}: no control characters`);
+        assert.ok(row.subtitle.length <= 160, `${target} ${status} ${label}: bounded subtitle`);
+        for (const secret of SECRETS) assert.ok(!text.includes(secret), `${target} ${status} ${label}: does not show "${secret}": ${text}`);
+      }
+    }
+    const yt = formatSessionRow({ agent: 'opencode', status: STATUS.YOUR_TURN, reason: SANITIZATION_CORPUS[1][1], title: 'Deploy', cwd: '/srv/app' }, { emoji: '🟠', label: 'Your Turn' }, '1m ago');
+    assert.deepStrictEqual(yt, { title: '🟠 [opencode] Deploy', subtitle: 'Your Turn: permission.asked:bash • 1m ago • /srv/app' });
+    const plain = formatSessionRow({ agent: 'copilot', status: STATUS.COOKING, reason: 'tool:bash:executing', title: '', cwd: '' }, { emoji: '🟡', label: 'Cooking' }, '2s ago');
+    assert.deepStrictEqual(plain, { title: '🟡 [copilot] global', subtitle: 'Cooking: tool:bash:executing • 2s ago' }, 'ordinary rows unchanged');
+  }
+}
+
 function testExtensionNotificationParityWithTracker() {
   const s = (session_id, status, extra = {}) => ({ session_id, agent: 'opencode', status, title: 'T', cwd: '', reason: HOSTILE_REASONS[session_id === 'a' ? status : 'cmd'] || '', ...extra });
   const scenarios = [
@@ -687,6 +708,7 @@ function run() {
   testExtensionLifecycleParityWithNode();
   testExtensionNotificationParityWithTracker();
   testNotificationSanitizationParity();
+  testMenuRowsAreSanitized();
   testNotificationSanitizerIsBounded();
   testSecretsAtTheCutoffAreDropped();
   testMalformedNotificationInputs();
