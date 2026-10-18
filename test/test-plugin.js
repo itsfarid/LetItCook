@@ -143,6 +143,27 @@ async function testPendingPermissionRequestsKeepYourTurn() {
   await emit('message.updated', { info: { id: 'u_err', sessionID: 'pending_err', role: 'user' } });
   assert.strictEqual(state('pending_err').status, STATUS.COOKING, 'new prompt after Burn => Cooking');
 
+  // A late or duplicate update of the completing assistant message keeps Done; other
+  // assistant activity and a new prompt still start Cooking.
+  const completion = { id: 'msg_a1', sessionID: 'late_dup', role: 'assistant', parentID: 'msg_u1', finish: 'stop', time: { completed: 1 } };
+  await emit('message.updated', { info: { id: 'msg_u1', sessionID: 'late_dup', role: 'user' } });
+  await emit('message.updated', { info: completion });
+  await emit('session.status', { sessionID: 'late_dup', status: { type: 'idle' } });
+  await emit('session.idle', { sessionID: 'late_dup' });
+  assert.strictEqual(state('late_dup').status, STATUS.DONE, 'completion + idle => Done');
+  await emit('message.updated', { info: completion });
+  await emit('message.updated', { info: { ...completion, time: { completed: 2 } } });
+  assert.strictEqual(state('late_dup').status, STATUS.DONE, 'duplicate completion update keeps Done');
+  await emit('session.idle', { sessionID: 'late_dup' });
+  assert.strictEqual(state('late_dup').status, STATUS.DONE, 'a further idle keeps Done');
+  assert.strictEqual('_completionMessageId' in state('late_dup'), false, 'bookkeeping not persisted');
+  await emit('message.updated', { info: { ...completion, id: 'msg_a2' } });
+  assert.strictEqual(state('late_dup').status, STATUS.COOKING, 'a different assistant message after Done is Cooking (unchanged)');
+  await emit('message.updated', { info: { id: 'msg_u2', sessionID: 'late_dup', role: 'user' } });
+  await emit('message.updated', { info: completion });
+  await emit('session.idle', { sessionID: 'late_dup' });
+  assert.strictEqual(state('late_dup').status, STATUS.UNKNOWN, 'old completion never completes a new prompt');
+
   // Malformed events (non-string type, missing properties) are ignored without throwing.
   const before = fs.readdirSync(dir).sort();
   for (const event of [{ type: 123 }, { type: {} }, { type: true }, { type: ['session.idle'] },
