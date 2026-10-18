@@ -483,6 +483,31 @@ function testPruneKeepsFileRewrittenAfterRead() {
   }
 }
 
+// L12: a state directory owned by another user (or not a directory) is refused instead of
+// being written to silently.
+function testForeignStateDirIsRefused() {
+  const root = mkTmp('fs-foreign');
+  const realGetuid = process.getuid;
+  try {
+    const target = path.join(root, 'letitcook', 'sessions');
+    fs.mkdirSync(target, { recursive: true, mode: 0o700 });
+    process.getuid = () => realGetuid.call(process) + 1; // the directory now belongs to "someone else"
+    assert.throws(() => ensurePrivateDir(target), /not owned by the current user/);
+    assert.throws(() => writeSessionFile({ session_id: 'ses_foreign', agent: 'opencode', status: STATUS.COOKING }, target), /not owned/);
+    assert.throws(() => new CopilotAdapter().syncToStateDir(target, { copilotDir: path.join(root, 'none') }), /not owned/);
+    process.getuid = realGetuid;
+    assert.deepStrictEqual(fs.readdirSync(target), [], 'nothing was written');
+
+    const notDir = path.join(root, 'file-not-dir');
+    fs.writeFileSync(notDir, '');
+    assert.throws(() => ensurePrivateDir(notDir));
+    ensurePrivateDir(target); // own directory still accepted
+  } finally {
+    process.getuid = realGetuid;
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+}
+
 function run() {
   testSessionIdValidator();
   testOpenCodeRejectsTraversal();
@@ -495,6 +520,7 @@ function run() {
   testCraftedSessionCannotDeleteAnother();
   testSymlinkedSessionFilesAreIgnored();
   testPruneKeepsFileRewrittenAfterRead();
+  testForeignStateDirIsRefused();
   testExtensionEnumeratorCleanup();
   testExtensionStateDirPermissionsSource();
   console.log('All LetItCook filesystem hardening tests passed.');
