@@ -10,7 +10,10 @@ let writeCounter = 0;
 export function getSessionDir(overrideDir) {
   if (overrideDir) return overrideDir;
   if (process.env.LETITCOOK_STATE_DIR) return process.env.LETITCOOK_STATE_DIR;
-  return path.join(os.homedir(), '.local', 'state', 'letitcook', 'sessions');
+  // Match GLib.get_user_state_dir() used by the GNOME extension.
+  const xdgState = process.env.XDG_STATE_HOME;
+  const stateHome = xdgState && path.isAbsolute(xdgState) ? xdgState : path.join(os.homedir(), '.local', 'state');
+  return path.join(stateHome, 'letitcook', 'sessions');
 }
 
 export function getWriteCount() {

@@ -5,6 +5,7 @@ import os from 'node:os';
 import { STATUS } from '../src/core/status.js';
 import { isValidSessionId, ensurePrivateDir } from '../src/core/fs-safe.js';
 import {
+  getSessionDir,
   writeSessionFile,
   deleteSessionFile,
   readAllSessionsFromDir,
@@ -383,6 +384,28 @@ function testSessionFilesArePrivate() {
   }
 }
 
+// The GNOME extension reads GLib.get_user_state_dir() (which honours XDG_STATE_HOME)
+// and notify.js honours it too, so writers must resolve the same sessions directory.
+function testSessionDirFollowsXdgStateHome() {
+  const saved = { xdg: process.env.XDG_STATE_HOME, dir: process.env.LETITCOOK_STATE_DIR };
+  try {
+    delete process.env.LETITCOOK_STATE_DIR;
+    delete process.env.XDG_STATE_HOME;
+    assert.strictEqual(getSessionDir(), path.join(os.homedir(), '.local', 'state', 'letitcook', 'sessions'));
+    process.env.XDG_STATE_HOME = '/custom/state';
+    assert.strictEqual(getSessionDir(), path.join('/custom/state', 'letitcook', 'sessions'));
+    process.env.XDG_STATE_HOME = 'relative/state';
+    assert.strictEqual(getSessionDir(), path.join(os.homedir(), '.local', 'state', 'letitcook', 'sessions'), 'relative XDG path ignored');
+    process.env.LETITCOOK_STATE_DIR = '/explicit/sessions';
+    assert.strictEqual(getSessionDir(), '/explicit/sessions', 'explicit override wins');
+    assert.strictEqual(getSessionDir('/arg'), '/arg', 'argument wins');
+  } finally {
+    for (const [k, v] of [['XDG_STATE_HOME', saved.xdg], ['LETITCOOK_STATE_DIR', saved.dir]]) {
+      if (v === undefined) delete process.env[k]; else process.env[k] = v;
+    }
+  }
+}
+
 function run() {
   testSessionIdValidator();
   testOpenCodeRejectsTraversal();
@@ -391,6 +414,7 @@ function run() {
   testPrivateDirectoryPermissions();
   testCopilotSyncCreatesPrivateDir();
   testSessionFilesArePrivate();
+  testSessionDirFollowsXdgStateHome();
   testExtensionEnumeratorCleanup();
   testExtensionStateDirPermissionsSource();
   console.log('All LetItCook filesystem hardening tests passed.');
