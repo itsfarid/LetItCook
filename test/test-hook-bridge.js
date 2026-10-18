@@ -82,8 +82,10 @@ function testContendedUpdateIsSkipped() {
     const before = fs.readFileSync(file, 'utf8');
     const lock = path.join(dir, `.${stateFileName('claude', 's1')}.lock`);
     fs.writeFileSync(lock, '');
-    const written = applySignals('claude', [{ type: SIGNAL.REQUEST_OPEN, sessionId: 's1', requestId: 'r2' }], { stateDir: dir, pid: null, lockTimeoutMs: 50 });
+    const outcomes = [];
+    const written = applySignals('claude', [{ type: SIGNAL.REQUEST_OPEN, sessionId: 's1', requestId: 'r2' }], { stateDir: dir, pid: null, lockTimeoutMs: 50, outcomes });
     assert.deepStrictEqual(written, [], 'no update without the lock');
+    assert.deepStrictEqual(outcomes, ['busy'], 'reported as busy');
     assert.strictEqual(fs.readFileSync(file, 'utf8'), before, 'the file is untouched');
     assert.ok(fs.existsSync(lock), "another hook's lock is not removed");
   } finally {
@@ -147,7 +149,12 @@ function testApplySignalsWritesReadableState() {
     assert.strictEqual(session.agent, 'claude');
     assert.strictEqual(session.pid, process.pid);
 
-    applySignals('claude', [{ type: SIGNAL.TURN_COMPLETE, sessionId: 's1' }], { stateDir: dir, now: 2000, pid: process.pid });
+    const outcomes = [];
+    applySignals('claude', [{ type: SIGNAL.TURN_COMPLETE, sessionId: 's1' }], { stateDir: dir, now: 2000, pid: process.pid, outcomes });
+    applySignals('claude', [{ type: SIGNAL.TURN_COMPLETE, sessionId: 's1' }], { stateDir: dir, now: 2001, pid: process.pid, outcomes });
+    applySignals('claude', [{ type: SIGNAL.ACTIVITY, sessionId: 's1' }, { type: 'bogus', sessionId: 's1' }, { type: SIGNAL.ACTIVITY, sessionId: '../x' }],
+      { stateDir: dir, now: 2002, pid: process.pid, outcomes });
+    assert.deepStrictEqual(outcomes, ['written', 'unchanged', 'ignored', 'ignored', 'ignored'], 'one outcome per signal');
     assert.strictEqual(readAllSessionsFromDir(dir, { now: 2000, isPidAlive: () => true })[0].status, STATUS.DONE);
 
     const before = fs.statSync(file).mtimeMs;

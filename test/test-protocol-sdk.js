@@ -59,6 +59,33 @@ function testTwoReportersSameSessionDoNotCollide() {
   });
 }
 
+// A request the producer cannot report (undeclared capability) is not acknowledged: the
+// caller gets no request id, because the panel never showed it (Devin review on PR #7).
+function testUnappliedEventsAreReported() {
+  withDir((dir) => {
+    const status = () => JSON.parse(fs.readFileSync(path.join(dir, '@mycli.sdk-3.json'), 'utf8')).status;
+    const limited = createReporter({ agent: 'mycli', sessionId: 'sdk-3', stateDir: dir, capabilities: [] });
+    assert.deepStrictEqual(limited.sessionStarted(), { ok: false, error: 'ignored' }, 'no session to describe yet');
+    assert.deepStrictEqual(limited.turnStarted(), { ok: true });
+    assert.strictEqual(limited.requestOpened({ kind: 'permission', subject: 'shell' }), null, 'undeclared requests get no id');
+    assert.strictEqual(status(), STATUS.COOKING, 'and are not shown');
+    assert.deepStrictEqual(limited.turnCompleted(), { ok: false, error: 'ignored' }, 'undeclared completion');
+    assert.deepStrictEqual(limited.turnFailed('x'), { ok: false, error: 'ignored' }, 'undeclared failure');
+    assert.deepStrictEqual(limited.turnEnded(), { ok: true });
+    assert.strictEqual(status(), STATUS.YOUR_TURN);
+
+    const full = createReporter({ agent: 'mycli', sessionId: 'sdk-4', stateDir: dir, capabilities: ['requests', 'complete'] });
+    full.turnStarted();
+    const id = full.requestOpened({ kind: 'question' });
+    assert.ok(id, 'a declared request gets its id');
+    assert.deepStrictEqual(full.activity(), { ok: true }, 'applied even when nothing new is written');
+    assert.deepStrictEqual(full.requestResolved(id, 'answered'), { ok: true });
+    assert.deepStrictEqual(full.requestResolved('unknown-request', 'answered'), { ok: true }, 'resolving an unknown request is a no-op, not an error');
+    full.turnCompleted();
+    assert.deepStrictEqual(full.activity(), { ok: false, error: 'ignored' }, 'activity on a finished turn is not applied');
+  });
+}
+
 function testNeverThrows() {
   withDir((dir, root) => {
     assert.deepStrictEqual(createReporter({ agent: 'claude', sessionId: 's', stateDir: dir }).turnStarted(), { ok: false, error: 'reserved_agent' });
@@ -74,6 +101,7 @@ function testNeverThrows() {
 function run() {
   testFullSession();
   testTwoReportersSameSessionDoNotCollide();
+  testUnappliedEventsAreReported();
   testNeverThrows();
   console.log('All LetItCook protocol SDK tests passed.');
 }
