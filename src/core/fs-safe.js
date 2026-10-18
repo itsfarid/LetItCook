@@ -36,8 +36,19 @@ function hardenDir(dir) {
 // state directory that was created with broader permissions. Only `dir` itself and,
 // for the standard `.../letitcook/sessions` layout, its `letitcook` parent are
 // modified; unrelated ancestors are never chmod-ed.
+//
+// Throws if `dir` is not a directory owned by the current user (for example a misset
+// XDG_STATE_HOME or a run under sudo): session state is never written into a directory
+// someone else controls.
 export function ensurePrivateDir(dir) {
   fs.mkdirSync(dir, { recursive: true, mode: PRIVATE_DIR_MODE });
+  const st = fs.statSync(dir);
+  if (!st.isDirectory()) {
+    throw new Error(`LetItCook state path is not a directory: ${dir}`);
+  }
+  if (typeof process.getuid === 'function' && st.uid !== process.getuid()) {
+    throw new Error(`LetItCook state directory is not owned by the current user; refusing to use it: ${dir}`);
+  }
   hardenDir(dir);
   const parent = path.dirname(dir);
   if (path.basename(dir) === 'sessions' && path.basename(parent) === 'letitcook') {
