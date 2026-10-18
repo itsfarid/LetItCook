@@ -15,6 +15,19 @@ While an AI coding agent works autonomously, you may switch to another activity 
 
 LetItCook answers that question for you without opening the terminal.
 
+## See LetItCook in Action
+
+| Cooking | Done |
+|---|---|
+| The agent is actively working. | The agent has completed its task successfully. |
+| ![LetItCook showing Cooking in the GNOME Shell top panel](docs/images/cooking.png) | ![LetItCook showing Done in the GNOME Shell top panel](docs/images/done.png) |
+
+### User interaction notifications
+
+When a supported agent requires user interaction, LetItCook can display a GNOME desktop notification explaining the request.
+
+![LetItCook displaying a Your Turn notification in GNOME Shell](docs/images/notification.png)
+
 ## Supported agents
 
 | Agent | Status | State source |
