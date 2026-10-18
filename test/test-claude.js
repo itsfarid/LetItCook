@@ -212,6 +212,48 @@ function testPermissionsAndQuestions() {
   }
 }
 
+function testTurnEndings() {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'letitcook-claude-end-'));
+  const state = sid => new ClaudeAdapter().getSessionState(sid, { baseDir: dir });
+  const file = sid => path.join(dir, `claude_${sid}.json`);
+  try {
+    replay([claudeEvent('UserPromptSubmit', 'e1'), claudeEvent('Stop', 'e1', { stop_hook_active: false, last_assistant_message: 'secret' })], dir);
+    assert.strictEqual(state('e1').status, STATUS.DONE, 'Stop -> Done');
+    replay([claudeEvent('Stop', 'e1'), claudeEvent('PostToolUse', 'e1', { tool_name: 'Bash', tool_use_id: 't', agent_id: 'bg' })], dir);
+    assert.strictEqual(state('e1').status, STATUS.DONE, 'duplicate Stop and late subagent activity keep Done');
+    // Another Stop hook blocked the stop: Claude continues the turn with a new tool call.
+    replay([claudeEvent('PreToolUse', 'e1', { tool_name: 'Bash', tool_use_id: 't2' })], dir);
+    assert.strictEqual(state('e1').status, STATUS.COOKING, 'the main agent continuing leaves Done');
+    replay([claudeEvent('Stop', 'e1', { stop_hook_active: true })], dir);
+    assert.strictEqual(state('e1').status, STATUS.DONE);
+
+    replay([claudeEvent('UserPromptSubmit', 'e2'), claudeEvent('StopFailure', 'e2', { error: 'rate_limit', error_details: 'secret details' })], dir);
+    assert.strictEqual(state('e2').status, STATUS.BURN, 'StopFailure -> Burn');
+    assert.strictEqual(state('e2').reason, 'error:rate_limit');
+    replay([claudeEvent('StopFailure', 'e2', { error: 'over; rm -rf /' })], dir);
+    assert.strictEqual(state('e2').reason, 'error:overrm-rf', 'error codes are reduced to identifiers');
+
+    // Esc while a tool runs: the tool fails with is_interrupt and Stop does not fire.
+    replay([
+      claudeEvent('UserPromptSubmit', 'e3'),
+      claudeEvent('PreToolUse', 'e3', { tool_name: 'Bash', tool_use_id: 't' }),
+      claudeEvent('PostToolUseFailure', 'e3', { tool_name: 'Bash', tool_use_id: 't', error: 'interrupted', is_interrupt: true }),
+    ], dir);
+    assert.strictEqual(state('e3').status, STATUS.YOUR_TURN, 'an interrupt hands the turn back, it is not Burn');
+    assert.strictEqual(state('e3').reason, 'interrupted');
+
+    // A session ending never claims Done, whatever it was doing.
+    for (const before of [[], [claudeEvent('PreToolUse', 'e4', { tool_name: 'Bash' })], [claudeEvent('PermissionRequest', 'e4', { tool_name: 'Bash' })]]) {
+      replay([claudeEvent('UserPromptSubmit', 'e4'), ...before, claudeEvent('SessionEnd', 'e4', { reason: 'prompt_input_exit' })], dir);
+      assert.ok(!fs.existsSync(file('e4')), 'SessionEnd removes the session');
+    }
+    replay([claudeEvent('SessionEnd', 'never-started', { reason: 'other' })], dir);
+    assert.ok(!fs.existsSync(file('never-started')));
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+}
+
 function testHookCommandEndToEnd() {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'letitcook-claude-e2e-'));
   try {
@@ -234,6 +276,7 @@ function run() {
   testIgnoresMalformedInput();
   testActivityAndIdentity();
   testPermissionsAndQuestions();
+  testTurnEndings();
   testHookCommandEndToEnd();
   console.log('All LetItCook Claude Code adapter tests passed.');
 }
