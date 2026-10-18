@@ -7,7 +7,7 @@ import { pathToFileURL } from 'node:url';
 import { LetItCookPlugin } from '../src/adapters/opencode/plugin.js';
 import { STATUS, aggregateState } from '../src/core/status.js';
 import { NotificationTracker } from '../src/core/notification.js';
-import { readAllSessionsFromDir } from '../src/adapters/opencode/adapter.js';
+import { readAllSessionsFromDir, extractSessionId, mapOpenCodeEvent } from '../src/adapters/opencode/adapter.js';
 
 async function testTerminalFilesSurvivePluginProcessExit() {
   const testDir = path.join(os.tmpdir(), `letitcook_exit_${Date.now()}`);
@@ -142,6 +142,17 @@ async function testPendingPermissionRequestsKeepYourTurn() {
   assert.strictEqual(state('pending_err').status, STATUS.BURN, 'session.error while pending => Burn');
   await emit('message.updated', { info: { id: 'u_err', sessionID: 'pending_err', role: 'user' } });
   assert.strictEqual(state('pending_err').status, STATUS.COOKING, 'new prompt after Burn => Cooking');
+
+  // Malformed events (non-string type, missing properties) are ignored without throwing.
+  const before = fs.readdirSync(dir).sort();
+  for (const event of [{ type: 123 }, { type: {} }, { type: true }, { type: ['session.idle'] },
+    { type: 123, properties: { sessionID: 'pending_v1' } }, { type: '', properties: { sessionID: 'pending_v1' } },
+    { type: 'message.updated', properties: null }, { type: 'message.updated', properties: { info: null } }, null, {}]) {
+    await plugin.event({ event });
+  }
+  assert.deepStrictEqual(fs.readdirSync(dir).sort(), before, 'malformed events create no session files');
+  assert.strictEqual(extractSessionId({ type: 42, properties: { info: { id: 'x' } } }), null);
+  assert.strictEqual(mapOpenCodeEvent({ type: 42, properties: { sessionID: 's' } }), null);
 
   // Bookkeeping is process-local and never persisted.
   assert.strictEqual('_pendingRequests' in state('pending_v1'), false, 'pending bookkeeping not written to state file');

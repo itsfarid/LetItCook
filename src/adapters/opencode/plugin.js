@@ -13,7 +13,7 @@ export const LetItCookPlugin = async (ctx) => {
 
   return {
     event: async ({ event }) => {
-      if (!event || !event.type) return;
+      if (!event || typeof event.type !== 'string' || !event.type) return;
 
       const sid = extractSessionId(event);
       if (!sid || sid === 'global') return;
