@@ -107,6 +107,9 @@ function testParseModel() {
 function testOnlyTheSelftestCommandIsApproved() {
   assert.strictEqual(isApprovedRequest({ permission: 'bash', patterns: [SELFTEST_COMMAND] }), true);
   assert.strictEqual(isApprovedRequest({ action: 'bash', resources: [SELFTEST_COMMAND] }), true, 'v2 shape');
+  assert.strictEqual(isApprovedRequest({ permission: 'bash', patterns: [SELFTEST_COMMAND], metadata: { command: SELFTEST_COMMAND } }), true, 'matching full command');
+  assert.strictEqual(isApprovedRequest({ permission: 'bash', patterns: [SELFTEST_COMMAND], metadata: { command: `cd /tmp && ${SELFTEST_COMMAND}` } }), false, 'full command differs from the pattern');
+  assert.strictEqual(isApprovedRequest({ permission: 'bash', patterns: [SELFTEST_COMMAND], metadata: { command: 42 } }), false, 'non-string command');
   for (const request of [
     null,
     { permission: 'bash', patterns: ['rm -rf /'] },
@@ -185,6 +188,20 @@ async function testSuccessPathCleansUp() {
   }
 }
 
+// The CLI summary never reports skipped checks as passed.
+async function testSummaryNamesSkippedChecks() {
+  const sandbox = makeSandbox('summary', 'success');
+  try {
+    const run = await runCli(sandbox, { trigger: async () => {} });
+    assert.deepStrictEqual(run.exit, { code: 0, signal: null }, run.output);
+    assert.ok(run.output.includes('No check failed; 2 not performed: Your Turn popup, Done popup.'), run.output);
+    assert.ok(!run.output.includes('All checks passed.'), 'skips are not reported as all passed');
+    sandbox.assertCleaned('summary');
+  } finally {
+    sandbox.dispose();
+  }
+}
+
 async function testStartupTimeoutCleansUp() {
   const sandbox = makeSandbox('startup-timeout', 'slow-start');
   try {
@@ -218,6 +235,7 @@ async function testSignalsCleanUp() {
       const run = await runCli(sandbox, {
         trigger: async (child) => {
           await waitUntil(() => sandbox.events().some(e => e.event === 'asked'));
+          fs.appendFileSync(sandbox.env.FAKE_OPENCODE_LOG, `${JSON.stringify({ event: 'signal' })}\n`);
           child.kill(signal);
         },
       });
@@ -227,10 +245,38 @@ async function testSignalsCleanUp() {
       const requests = sandbox.events().filter(e => e.event === 'request');
       assert.ok(requests.some(e => e.reply === 'reject'), `${signal}: pending permission rejected`);
       assert.ok(requests.some(e => e.method === 'DELETE'), `${signal}: test session deleted`);
+      // The workflow stops at the interruption: no approval, and nothing after cleanup.
+      const events = sandbox.events();
+      const afterSignal = events.slice(events.findIndex(e => e.event === 'signal'));
+      assert.ok(!afterSignal.some(e => e.reply === 'once'), `${signal}: no approval after the interruption`);
+      const afterDelete = afterSignal.slice(afterSignal.findIndex(e => e.method === 'DELETE') + 1);
+      assert.deepStrictEqual(afterDelete.filter(e => e.event === 'request'), [], `${signal}: no request after cleanup deleted the session`);
       sandbox.assertCleaned(signal);
     } finally {
       sandbox.dispose();
     }
+  }
+}
+
+// A server that has already exited is never signalled: its process-group ID may have been
+// reused by an unrelated process. Every process.kill call of the run is recorded.
+async function testExitedServerIsNotSignalled() {
+  const sandbox = makeSandbox('exited-server', 'exit-after-ask');
+  const originalKill = process.kill;
+  const groupSignals = [];
+  process.kill = (pid, signal) => {
+    if (pid < 0) groupSignals.push({ pid, signal });
+    return originalKill.call(process, pid, signal);
+  };
+  try {
+    const { results } = await runInProcess(sandbox, { notify: 300, request: 1000, killGrace: 500 });
+    assert.ok(sandbox.events().some(e => e.event === 'exiting'), 'fake server exited on its own');
+    assert.strictEqual(results.at(-1).outcome, 'FAIL', 'losing the server fails the run');
+    assert.deepStrictEqual(groupSignals, [], 'no process-group signal after the server exited');
+    sandbox.assertCleaned('exited server');
+  } finally {
+    process.kill = originalKill;
+    sandbox.dispose();
   }
 }
 
@@ -322,9 +368,11 @@ async function run() {
   testHelpAndBadArguments();
   testFailurePathsCleanUp();
   await testSuccessPathCleansUp();
+  await testSummaryNamesSkippedChecks();
   await testStartupTimeoutCleansUp();
   await testRequestTimeoutCleansUp();
   await testSignalsCleanUp();
+  await testExitedServerIsNotSignalled();
   await testSignalDuringStartupCleansUp();
   await testSignalWithUnresponsiveServerIsBounded();
   await testSecondSignalForcesExit();

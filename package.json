@@ -9,6 +9,9 @@
     "notify": "node src/notify.js",
     "selftest": "node src/selftest.js"
   },
+  "engines": {
+    "node": ">=20.3"
+  },
   "author": "",
   "license": "MIT"
 }

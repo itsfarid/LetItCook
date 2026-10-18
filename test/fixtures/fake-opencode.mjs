@@ -6,6 +6,7 @@
 //   success         full flow: Cooking -> permission -> (approve) -> Done
 //   hang-after-ask  stop after the permission request; never finishes
 //   hang-requests   once the permission is pending, never answer HTTP requests
+//   exit-after-ask  exit on its own right after the permission request
 //   slow-start      wait 5 s before listening
 //   ignore-sigterm  ignore SIGTERM (needs SIGKILL)
 //   idle            do nothing (decoy process)
@@ -51,6 +52,7 @@ if (modes.has('idle')) {
     await emit('permission.asked', request);
     log('asked', { sid });
     if (modes.has('hang-requests')) hangAll = true;
+    if (modes.has('exit-after-ask')) setTimeout(() => { log('exiting'); process.exit(0); }, 100);
   };
 
   const finish = async (sid, reply) => {

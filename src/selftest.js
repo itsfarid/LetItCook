@@ -63,12 +63,16 @@ export function parseModel(value) {
   return { providerID: value.slice(0, slash), modelID: value.slice(slash + 1) };
 }
 
-// Only the exact self-test command may be approved; everything else is rejected.
+// Only the exact self-test command may be approved; everything else is rejected. Besides
+// the permission patterns, the full command OpenCode will run (`metadata.command`) must be
+// exactly the self-test command whenever OpenCode provides it.
 export function isApprovedRequest(request) {
   const patterns = request && (request.patterns || request.resources);
+  const command = request?.metadata?.command;
   return Boolean(request) &&
     (request.permission || request.action) === 'bash' &&
-    Array.isArray(patterns) && patterns.length === 1 && patterns[0].trim() === SELFTEST_COMMAND;
+    Array.isArray(patterns) && patterns.length === 1 && patterns[0].trim() === SELFTEST_COMMAND &&
+    (command === undefined || (typeof command === 'string' && command.trim() === SELFTEST_COMMAND));
 }
 
 // First line of an agent-provided reason, without stack traces or control characters.
@@ -164,19 +168,22 @@ function startServer(bin, cwd, password, timeoutMs, onSpawn) {
   });
 }
 
+function hasExited(child) {
+  return child.exitCode !== null || child.signalCode !== null;
+}
+
 // The server runs in its own process group (detached), so only that group is signalled;
-// other OpenCode processes are never touched.
+// other OpenCode processes are never touched. The group is signalled only while Node has
+// not reported the server's exit: until then the server (or its unreaped zombie) holds the
+// PID, so the group ID cannot have been reused by an unrelated process. Once it has
+// exited, nothing is signalled, even if members of its group may remain.
 function killServerGroup(child, signal) {
-  if (!child || !child.pid) return;
+  if (!child || !child.pid || hasExited(child)) return;
   try { process.kill(-child.pid, signal); } catch {}
 }
 
 function stopServer(child, graceMs) {
-  if (!child || !child.pid) return Promise.resolve();
-  if (child.exitCode !== null || child.signalCode !== null) {
-    killServerGroup(child, 'SIGTERM'); // leftover group members, if any
-    return Promise.resolve();
-  }
+  if (!child || !child.pid || hasExited(child)) return Promise.resolve();
   return new Promise((resolve) => {
     let forced = null;
     const timer = setTimeout(() => {
@@ -220,12 +227,15 @@ export async function runSelftest(opts = {}) {
   const history = [];
   let recorder = null;
 
-  const api = async (method, route, body, timeoutMs = timeouts.request) => {
+  // Aborted on interruption: the main workflow sends nothing more (no approvals) while,
+  // and after, cleanup runs. Cleanup requests use their own time-boxed signal.
+  const workflow = new AbortController();
+  const send = async (method, route, body, signal) => {
     const response = await fetch(url + route, {
       method,
       headers: { authorization: auth, 'content-type': 'application/json' },
       body: body === undefined ? undefined : JSON.stringify(body),
-      signal: AbortSignal.timeout(timeoutMs),
+      signal,
     });
     const text = await response.text();
     let json = null;
@@ -233,9 +243,14 @@ export async function runSelftest(opts = {}) {
     if (!response.ok) throw new Error(`${method} ${route} -> HTTP ${response.status}`);
     return json;
   };
-  const pendingRequests = async (timeoutMs) => {
-    const list = await api('GET', '/permission', undefined, timeoutMs);
-    return Array.isArray(list) ? list.filter(request => request.sessionID === sid) : [];
+  const api = (method, route, body) => {
+    if (workflow.signal.aborted) return Promise.reject(new Error('self-test interrupted'));
+    return send(method, route, body, AbortSignal.any([AbortSignal.timeout(timeouts.request), workflow.signal]));
+  };
+  const cleanupApi = (method, route, body) => send(method, route, body, AbortSignal.timeout(timeouts.cleanupRequests));
+  const pendingRequests = async (call = api) => {
+    const list = await call('GET', '/permission');
+    return Array.isArray(list) ? list.filter(item => item.sessionID === sid) : [];
   };
   const readState = () => {
     try { return JSON.parse(fs.readFileSync(path.join(stateDir, `${sid}.json`), 'utf8')); } catch { return null; }
@@ -244,7 +259,7 @@ export async function runSelftest(opts = {}) {
   const describe = entry => (entry ? `${entry.status} [${summarizeReason(entry.reason, 80)}]` : 'no state file');
   const waitFor = async (predicate, timeoutMs) => {
     const deadline = Date.now() + timeoutMs;
-    while (Date.now() < deadline) {
+    while (Date.now() < deadline && !workflow.signal.aborted) {
       const value = await predicate();
       if (value) return value;
       await sleep(POLL_MS);
@@ -278,12 +293,12 @@ export async function runSelftest(opts = {}) {
     if (sid && url) {
       const removeSession = async () => {
         try {
-          for (const extra of await pendingRequests(timeouts.cleanupRequests)) {
-            await api('POST', `/permission/${extra.id}/reply`, { reply: 'reject' }, timeouts.cleanupRequests);
+          for (const extra of await pendingRequests(cleanupApi)) {
+            await cleanupApi('POST', `/permission/${extra.id}/reply`, { reply: 'reject' });
           }
         } catch {}
-        try { await api('POST', `/session/${sid}/abort`, undefined, timeouts.cleanupRequests); } catch {}
-        try { await api('DELETE', `/session/${sid}`, undefined, timeouts.cleanupRequests); } catch {}
+        try { await cleanupApi('POST', `/session/${sid}/abort`); } catch {}
+        try { await cleanupApi('DELETE', `/session/${sid}`); } catch {}
         await sleep(500);
       };
       await withinBudget(removeSession(), timeouts.cleanupRequests);
@@ -309,6 +324,7 @@ export async function runSelftest(opts = {}) {
       process.exit(exitCode);
     }
     interrupted = signal;
+    workflow.abort();
     log(`\nInterrupted (${signal}); cleaning up...`);
     cleanup().finally(() => process.exit(exitCode));
   }
@@ -459,7 +475,10 @@ Options:
   }
   const results = await runSelftest(opts);
   const failed = results.filter(result => result.outcome === 'FAIL').length;
-  console.log(failed === 0 ? 'All checks passed.' : `${failed} check(s) failed.`);
+  const skipped = results.filter(result => result.outcome === 'SKIP').map(result => result.step);
+  if (failed > 0) console.log(`${failed} check(s) failed.`);
+  else if (skipped.length > 0) console.log(`No check failed; ${skipped.length} not performed: ${skipped.join(', ')}.`);
+  else console.log('All checks passed.');
   process.exit(failed === 0 ? 0 : 1);
 }
 

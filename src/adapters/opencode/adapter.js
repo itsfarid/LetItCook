@@ -38,8 +38,21 @@ export function hasMeaningfulStateChange(prev, next) {
     prev._completionCandidate !== next._completionCandidate ||
     prev._lastUserMessageId !== next._lastUserMessageId ||
     JSON.stringify(prev._toolMessageIds || []) !== JSON.stringify(next._toolMessageIds || []) ||
-    JSON.stringify(prev._pendingRequests || {}) !== JSON.stringify(next._pendingRequests || {})
+    JSON.stringify(prev._pendingRequests || {}) !== JSON.stringify(next._pendingRequests || {}) ||
+    prev._completionMessageId !== next._completionMessageId
   );
+}
+
+// While OpenCode keeps emitting events for an active (Cooking / Your Turn) session without
+// a state change, e.g. output streaming from a long tool call, its file is rewritten at
+// most this often so `updated_at` keeps proving activity and the session does not go
+// stale. Without events nothing is written, so a silent agent still becomes Unknown.
+export const HEARTBEAT_MS = 60 * 1000;
+
+export function isHeartbeatDue(prev, next, intervalMs = HEARTBEAT_MS) {
+  if (!prev || !next) return false;
+  if (next.status !== STATUS.COOKING && next.status !== STATUS.YOUR_TURN) return false;
+  return typeof prev.updated_at === 'number' && next.updated_at - prev.updated_at >= intervalMs;
 }
 
 const REQUEST_ASKED = new Set(['permission.asked', 'permission.v2.asked', 'question.asked', 'question.v2.asked']);
@@ -73,7 +86,7 @@ function applyPendingRequests(status, reason, pending) {
 }
 
 export function extractSessionId(event) {
-  if (!event) return null;
+  if (!event || typeof event.type !== 'string') return null;
   const p = event.properties || {};
   return p.sessionID || p.sessionId || (p.session && p.session.id) || (p.info && p.info.sessionID) ||
     (p.part && p.part.sessionID) || (event.type.startsWith('session.') && p.info && p.info.id) || null;
@@ -92,7 +105,7 @@ export function extractTitle(event) {
 }
 
 export function mapOpenCodeEvent(event, previousState = null) {
-  if (!event || !event.type) return null;
+  if (!event || typeof event.type !== 'string' || !event.type) return null;
 
   const sessionId = extractSessionId(event) || (previousState ? previousState.session_id : null);
   if (!sessionId || sessionId === 'global') return null;
@@ -122,7 +135,8 @@ export function mapOpenCodeEvent(event, previousState = null) {
     case 'question.asked':
     case 'question.v2.asked': {
       status = STATUS.YOUR_TURN;
-      const perm = p.permission || p.action || p.question || p.header || 'permission requested';
+      const fallback = event.type.startsWith('question.') ? 'question' : 'permission requested';
+      const perm = p.permission || p.action || p.question || p.header || fallback;
       const pat = Array.isArray(p.patterns || p.resources) ? (p.patterns || p.resources).slice(0, 2).join(',') : '';
       reason = pat ? `${event.type}:${perm}:${pat}` : `${event.type}:${perm}`;
       break;
@@ -131,7 +145,8 @@ export function mapOpenCodeEvent(event, previousState = null) {
     case 'permission.v2.replied':
     case 'question.replied':
     case 'question.v2.replied':
-    case 'question.rejected': {
+    case 'question.rejected':
+    case 'question.v2.rejected': {
       status = STATUS.COOKING;
       reason = `${event.type}:${p.reply || p.action || 'replied'}`;
       break;
@@ -189,6 +204,11 @@ export function mapOpenCodeEvent(event, previousState = null) {
           status = previousState ? previousState.status : STATUS.COOKING;
           reason = previousState ? previousState.reason : 'user message updated';
         }
+      } else if (info.role === 'assistant' && previousState?.status === STATUS.DONE &&
+                 typeof info.id === 'string' && info.id === previousState._completionMessageId) {
+        // A late or duplicate update of the message that completed the turn keeps Done.
+        status = previousState.status;
+        reason = previousState.reason;
       } else if (info.role === 'assistant') {
         const toolMessageIds = previousState?._toolMessageIds || [];
         const completedAt = info.time?.completed;
@@ -251,6 +271,7 @@ export function mapOpenCodeEvent(event, previousState = null) {
   let lastUserMessageId = previousState?._lastUserMessageId;
   let toolMessageIds = previousState?._toolMessageIds || [];
   let completionCandidate = false;
+  let completionMessageId = previousState?._completionMessageId;
 
   const isNewUserMessage = event.type === 'message.updated' && info.role === 'user' &&
     ((typeof info.id === 'string' && Boolean(info.id))
@@ -261,19 +282,21 @@ export function mapOpenCodeEvent(event, previousState = null) {
     lastUserMessageId = info.id;
     toolMessageIds = [];
     completionCandidate = false;
+    completionMessageId = undefined;
   } else if (event.type === 'message.part.updated' && p.part?.type === 'tool' && typeof p.part.messageID === 'string') {
     toolMessageIds = [...new Set([...toolMessageIds, p.part.messageID])];
     completionCandidate = false;
   } else if (event.type === 'message.updated' && info.role === 'assistant') {
     const completedAt = info.time?.completed;
     const finish = info.finish;
-    completionCandidate =
+    completionCandidate = status !== STATUS.DONE &&
       Number.isFinite(completedAt) && completedAt > 0 &&
       typeof finish === 'string' && finish.length > 0 &&
       finish !== 'tool-calls' && finish !== 'unknown' &&
       !info.error && info.summary !== true &&
       !toolMessageIds.includes(info.id) &&
       typeof lastUserMessageId === 'string' && info.parentID === lastUserMessageId;
+    if (completionCandidate) completionMessageId = info.id;
   } else if (isIdleStatusEvent(event, p)) {
     completionCandidate = false;
   } else if (status === STATUS.DONE || status === STATUS.BURN || status === STATUS.YOUR_TURN) {
@@ -295,6 +318,7 @@ export function mapOpenCodeEvent(event, previousState = null) {
     _lastUserMessageId: lastUserMessageId,
     _toolMessageIds: toolMessageIds,
     _completionCandidate: completionCandidate,
+    _completionMessageId: completionMessageId,
     _pendingRequests: pendingRequests,
   };
 }
@@ -337,6 +361,7 @@ export function mapToolHook(stage, input, previousState = null) {
     _lastUserMessageId: previousState?._lastUserMessageId,
     _toolMessageIds: previousState?._toolMessageIds || [],
     _completionCandidate: false,
+    _completionMessageId: previousState?._completionMessageId,
     _pendingRequests: pendingRequests,
   };
 }
@@ -350,7 +375,7 @@ export function writeSessionFile(session, baseDir) {
   const tmpPath = path.join(targetDir, `.${sessionId}.${process.pid}.${Date.now()}.tmp`);
 
   // Completion bookkeeping is process-local and must not leak into the normalized state file.
-  const { _lastUserMessageId, _toolMessageIds, _completionCandidate, _pendingRequests, ...persistedSession } = session;
+  const { _lastUserMessageId, _toolMessageIds, _completionCandidate, _completionMessageId, _pendingRequests, ...persistedSession } = session;
   // ponytail: atomic rename on POSIX, upgrade to lockfile if cross-device issues occur
   fs.writeFileSync(tmpPath, JSON.stringify(persistedSession, null, 2), { encoding: 'utf8', mode: 0o600 });
   fs.renameSync(tmpPath, filePath);
@@ -368,15 +393,39 @@ export function deleteSessionFile(sessionId, baseDir) {
   } catch {}
 }
 
+// Removes exactly the file that was read, and only if it is still that file: a file
+// rewritten since it was read (new state from a live agent) is kept.
+function removeIfUnchanged(filePath, readStat) {
+  try {
+    const now = fs.lstatSync(filePath);
+    if (now.isFile() && now.dev === readStat.dev && now.ino === readStat.ino &&
+        now.size === readStat.size && now.mtimeMs === readStat.mtimeMs) {
+      fs.unlinkSync(filePath);
+    }
+  } catch {}
+}
+
+// Reads every session file in the state directory. Terminated sessions are pruned (their
+// own file is removed) unless `options.prune === false`, which read-only callers such as
+// the notification inspection CLI use. Symlinks and other non-regular files are skipped:
+// the writers only ever create regular files.
 export function readAllSessionsFromDir(baseDir, options = {}) {
   const targetDir = getSessionDir(baseDir);
   if (!fs.existsSync(targetDir)) return [];
+  const prune = options.prune !== false;
 
   const files = fs.readdirSync(targetDir).filter(f => f.endsWith('.json') && !f.startsWith('.'));
   const sessions = [];
 
   for (const file of files) {
     const fullPath = path.join(targetDir, file);
+    let stat;
+    try {
+      stat = fs.lstatSync(fullPath);
+    } catch {
+      continue;
+    }
+    if (!stat.isFile()) continue;
     try {
       const raw = fs.readFileSync(fullPath, 'utf8');
       const parsed = JSON.parse(raw);
@@ -385,7 +434,7 @@ export function readAllSessionsFromDir(baseDir, options = {}) {
       }
       const normalized = normalizeSession(parsed, options);
       if (normalized.terminated) {
-        deleteSessionFile(normalized.session_id, baseDir);
+        if (prune) removeIfUnchanged(fullPath, stat);
       } else {
         sessions.push(normalized);
       }
@@ -449,6 +498,7 @@ export default {
   getWriteCount,
   resetWriteCount,
   hasMeaningfulStateChange,
+  isHeartbeatDue,
   extractSessionId,
   extractCwd,
   extractTitle,

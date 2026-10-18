@@ -6,7 +6,7 @@ GNOME Shell top-panel indicator: 🟡Cooking · 🟠Your Turn · 🟢Done · �
 LetItCook listens to agent events (OpenCode plugin hooks, Copilot CLI event logs) and writes normalized session state files to a shared state directory. The GNOME Shell extension reads these files to update the panel indicator and handle notifications.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Node.js](https://img.shields.io/badge/Node.js-&gt;=20.0.0-brightgreen.svg)](https://nodejs.org/)
+[![Node.js](https://img.shields.io/badge/Node.js-&gt;=20.3-brightgreen.svg)](https://nodejs.org/)
 [![GNOME](https://img.shields.io/badge/GNOME-42--47-blue.svg)](https://www.gnome.org/)
 
 ## What problem does LetItCook solve?
@@ -44,7 +44,7 @@ See [AGENTS.md §28](AGENTS.md#28-agent-adapter-status) for per-state reliabilit
 
 - **OS / Desktop**: Linux with GNOME Shell 42–47 (see [Project status](#project-status) for which versions have actually been tested)
 - **Agent CLI**: One of the supported agents must be installed
-- **Node.js**: Version 20.0.0 or later, needed for the Copilot sync bridge and for running tests (the OpenCode plugin runs inside OpenCode itself)
+- **Node.js**: Version 20.3 or later, needed for the Copilot sync bridge and for running tests (the OpenCode plugin runs inside OpenCode itself)
 
 Check your GNOME Shell version first; it decides which extension variant to install:
 
@@ -131,6 +131,8 @@ For persistent operation, run it as a systemd user service or Cron job.
 | `~/.local/state/letitcook/notify_cache.json` | Notification state (deduplication, notify-on-Done toggle) | Generated on first start | Deleting it resets notification state (opt-out) |
 | `~/.copilot/` | Copilot CLI state | Copilot-generated | Do not delete Copilot state unless you want to restart Copilot completely |
 
+The state directories must be owned by you. If `~/.local/state/letitcook` (or its `sessions` directory) is a symlink, it must be your own link to a directory you own that other users cannot access (`chmod 700` it); otherwise LetItCook refuses to use it rather than changing permissions through the link.
+
 **Default paths can be overridden via environment variables:**
 
 - `XDG_STATE_HOME`: Base state directory used by the extension, plugin, sync bridge, and notification tool alike (default: `~/.local/state`)
@@ -163,7 +165,7 @@ These describe current behavior and have not all been confirmed in day-to-day us
 
 - **OpenCode, cancelled prompts**: cancelling a running prompt makes OpenCode emit `session.error` (`MessageAbortedError`), which LetItCook shows as `Burn` and notifies.
 - **OpenCode, subagents**: subagent (child) sessions are tracked as separate sessions and can show their own `Done`.
-- **OpenCode, long single steps**: the plugin only rewrites state when the state changes, so one tool call or response that runs longer than 5 minutes can show as `Unknown` until the next change.
+- **OpenCode, long single steps**: while OpenCode keeps emitting events (for example streamed tool output), the plugin refreshes the session at most once a minute, so it stays `Cooking`. A step that runs longer than 5 minutes *without any events* still shows as `Unknown` until the next change.
 - **Copilot CLI**: every `assistant.turn_end` maps to `Your Turn`, so each finished turn notifies. `Done` requires `session.task_complete`, which is rare.
 - **Copilot CLI**: state only updates while `node src/sync.js --watch` is running.
 
@@ -244,7 +246,7 @@ node src/notify.js --test          # - Send one manual test notification via not
 
 ```bash
 # Verify Node.js
-node --version  # Should be >= 20.0.0
+node --version  # Should be >= 20.3
 
 # Verify GNOME Shell (if testing directly)
 gnome-shell --version
@@ -395,7 +397,7 @@ Each command is an independent test. Ready-to-run assertions are included in eve
 - Input validation: session IDs are sanitized (regex `[A-Za-z0-9][A-Za-z0-9._-]{0,127}`), file paths are validated, shell commands are avoided.
 - Logging never prints prompts, credentials, or sensitive agent messages. Structured agents and plugins must sanitize outputs before passing state to LetItCook.
 - GNOME extension notifications are delivered via the native GNOME notification system; no CLI dispatch to avoid race conditions.
-- Notification text is reduced to one short line. A Your Turn notification names only the kind of request (for example `permission.asked:bash`), never the command or its arguments. Error text in a Burn notification keeps only its first line, with credentials redacted, URLs reduced to their host, and absolute paths reduced to their last component.
+- Notification and panel-menu text is reduced to one short line (at most the first 512 characters of an agent's message are examined). A Your Turn notification names only the kind of request (for example `permission.asked:bash`), never the command or its arguments. Error text in a Burn notification keeps only its first line, with credentials redacted, URLs reduced to their host, and absolute paths reduced to their last component.
 - No external dependencies. If new dependencies are added, only standard Node.js and safe open-source packages should be used.
 
 ## Project status
