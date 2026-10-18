@@ -880,6 +880,7 @@ Current adapter support (2026-10-07, verified on this machine):
 | Gemini CLI | 0.56.0 | **Partially supported (fixture-tested only; no Done/Burn)** | Official hooks (`~/.gemini/settings.json`) → `src/hooks/hook.js gemini`; see `docs/adapters.md` |
 | Codex CLI | 0.160.1 | **Supported (fixture-tested only, no Burn)** | Official hooks (`~/.codex/hooks.json`) → `src/hooks/hook.js codex`; see `docs/adapters.md` |
 | Goose | 1.46.0 | Deferred | Hooks exist (Open Plugins) but none fires for approval requests and `Stop` has no outcome; see `docs/adapters.md` |
+| Event protocol | schema 1 | **Implemented (reference producer only)** | Any CLI/plugin/wrapper → `src/hooks/hook.js event` or `src/protocol/sdk.js`; see `docs/protocol.md`. Candidates (Qwen Code, Cline, Cursor, Amp, Aider, Crush) evaluated in `docs/adapters.md`, none integrated |
 
 Copilot adapter state reliability (based on the official `session-events.schema.json`
 and 43 real local sessions):
