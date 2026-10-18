@@ -50,7 +50,8 @@ export const claudeHooks = {
 
     switch (event) {
       case 'UserPromptSubmit':
-        return [{ ...base, type: SIGNAL.TURN_START, title: str(input.session_title) }];
+        // session_title is generated from the prompt, so it is not stored either.
+        return [{ ...base, type: SIGNAL.TURN_START }];
       case 'PreToolUse': {
         // The main agent starting a tool is new work even after Stop: Claude Code continues
         // a turn when another Stop hook blocks it, without a new prompt.
