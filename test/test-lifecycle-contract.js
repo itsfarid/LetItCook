@@ -258,6 +258,25 @@ function testLateRequestsAfterTheTurnEnded() {
   assert.strictEqual(run([{ type: SIGNAL.TURN_START }, { type: SIGNAL.TURN_COMPLETE }, { type: SIGNAL.REQUEST_OPEN, requestId: 'r' }]).state.status, STATUS.YOUR_TURN);
 }
 
+// Activity sent before the turn ended (delivered late) does not turn a turn that ended
+// without outcome, or was cancelled, back into Cooking (Devin review on PR #7).
+function testLateActivityAfterTheTurnEnded() {
+  for (const ending of [SIGNAL.TURN_END, SIGNAL.CANCEL, SIGNAL.TURN_COMPLETE, SIGNAL.FAILURE]) {
+    const finished = run([{ type: SIGNAL.TURN_START, turnId: 't1', at: 100 }, { type: ending, turnId: 't1', at: 300 }]).state;
+    for (const extra of [{}, { subagent: true }, { revive: true }]) {
+      const late = run([{ type: SIGNAL.ACTIVITY, at: 200, ...extra }], finished).state;
+      assert.strictEqual(late.status, finished.status, `${ending}: older activity ${JSON.stringify(extra)} is ignored`);
+    }
+  }
+  // Activity after the end still counts where it did before (Your Turn -> Cooking), and a
+  // new turn's activity is never compared with the old end.
+  const ended = run([{ type: SIGNAL.TURN_START, turnId: 't1', at: 100 }, { type: SIGNAL.TURN_END, turnId: 't1', at: 300 }]).state;
+  assert.strictEqual(run([{ type: SIGNAL.ACTIVITY, at: 400 }], ended).state.status, STATUS.COOKING);
+  assert.strictEqual(run([{ type: SIGNAL.TURN_START, turnId: 't2', at: 500 }, { type: SIGNAL.ACTIVITY, at: 450 }], ended).state.status, STATUS.COOKING);
+  // Without producer times (native adapters) nothing changes.
+  assert.strictEqual(run([{ type: SIGNAL.TURN_START }, { type: SIGNAL.TURN_END }, { type: SIGNAL.ACTIVITY }]).state.status, STATUS.COOKING);
+}
+
 // Request ids are producer data: inherited object member names must be ordinary keys
 // (Devin review on PR #7).
 function testPrototypeSensitiveRequestIds() {
@@ -328,6 +347,7 @@ function run_() {
   testCapabilities();
   testPrototypeSensitiveRequestIds();
   testLateRequestsAfterTheTurnEnded();
+  testLateActivityAfterTheTurnEnded();
   testSubagentsNeverSettleTheParent();
   testSessionEndNeverCompletes();
   testSessionsAreIsolated();

@@ -181,12 +181,13 @@ export function reduceSession(prev, signal, context = {}) {
   // - an event id already applied is a duplicate;
   // - a turn-ending event or a request for another turn than the current one is late;
   // - a turn start or end older than the last applied one is late;
-  // - a request from before the current turn ended is late: the ended turn cannot be
-  //   waiting for it.
+  // - a request or activity from before the current turn ended is late: the ended turn
+  //   is not waiting for that request or working any more (a turn that ended without
+  //   outcome or was cancelled stays Your Turn).
   if (s.eventId && seen.includes(s.eventId)) return null;
   if (s.turnId && turn && s.turnId !== turn && (TURN_ENDING.includes(type) || type === SIGNAL.REQUEST_OPEN)) return null;
   if (turnLevel && s.at && turnAt && s.at < turnAt) return null;
-  if (type === SIGNAL.REQUEST_OPEN && s.at && endedAt && s.at < endedAt) return null;
+  if ((type === SIGNAL.REQUEST_OPEN || type === SIGNAL.ACTIVITY) && s.at && endedAt && s.at < endedAt) return null;
   if (turnLevel) {
     if (type === SIGNAL.TURN_START) {
       turn = s.turnId;
