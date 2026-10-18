@@ -484,12 +484,14 @@ const SANITIZATION_CORPUS = [
   ['question', 'question.asked:permission requested'],
   ['plain', 'permission needed'],
   ['benign words', 'error:max tokens per minute: 5000; secret sauce is fine'],
+  ['bidi spoof', 'error:file \u202eexe.txt\u202c and zero\u200bwidth \u2066x\u2069'],
+  ['multilingual', 'error:ملف غير موجود — 文件未找到 — फ़ाइल नहीं मिली — می\u200cخواهم 👩\u200d💻'],
   ['prefixed key', 'error:error:token=hunter2tok:def and PGPASSWORD=hunter2pg'],
   ['spaced key', 'error:password = hunter2spaced and cookie: hunter2cookie; Path=/'],
   ['empty', ''],
   ['non-string', 42],
 ];
-const SECRETS = ['sk-live', 'sk-proj', 'hunter2', 'hunter2tok', 'hunter2pg', 'hunter2spaced', 'hunter2cookie', 'two words', '/home/alice', 'clients/acme', 'SessionPrompt', 'bunfs', 'second line', 'v1/deploy', 'key=abc'];
+const SECRETS = ['\u202e', '\u200b', '\u2066', 'sk-live', 'sk-proj', 'hunter2', 'hunter2tok', 'hunter2pg', 'hunter2spaced', 'hunter2cookie', 'two words', '/home/alice', 'clients/acme', 'SessionPrompt', 'bunfs', 'second line', 'v1/deploy', 'key=abc'];
 
 function testNotificationSanitizationParity() {
   for (const target of EXTENSION_TARGETS) {
@@ -519,6 +521,10 @@ function testNotificationSanitizationParity() {
   assert.strictEqual(path.body, "Burn: error:ENOENT: no such file or directory, open '…/.env.production' • Deploy");
   const benign = formatNotification({ agent: 'opencode', status: STATUS.BURN, title: 'Deploy', reason: SANITIZATION_CORPUS[11][1] });
   assert.strictEqual(benign.body, 'Burn: error:max tokens per minute: 5000; secret sauce is fine • Deploy', 'ordinary words are not redacted');
+  const bidi = formatNotification({ agent: 'opencode', status: STATUS.BURN, title: 'Deploy', reason: 'error:file \u202eexe.txt\u202c and zero\u200bwidth' });
+  assert.strictEqual(bidi.body, 'Burn: error:file exe.txt and zerowidth • Deploy', 'direction overrides and zero-width spaces removed');
+  const multilingual = 'error:ملف غير موجود — 文件未找到 — फ़ाइल नहीं मिली — می\u200cخواهم 👩\u200d💻';
+  assert.strictEqual(formatNotification({ agent: 'opencode', status: STATUS.BURN, reason: multilingual }).body, `Burn: ${multilingual} • global`, 'multilingual text, ZWNJ and ZWJ emoji kept');
   const cwd = formatNotification({ agent: 'opencode', status: STATUS.DONE, cwd: '/srv/app' });
   assert.strictEqual(cwd.body, 'Done • /srv/app', 'project identifier is kept');
 }
