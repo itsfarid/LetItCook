@@ -444,10 +444,14 @@ function testExtensionLifecycleParityWithNode() {
   }
 }
 
-function makeExtensionNotifier(target, notifyDone) {
+function makeExtensionNotifier(target, notifyDone, { failing = false } = {}) {
   const notified = [];
-  const Main = { notify: (title, body) => notified.push({ title, body }) };
-  const fn = loadExtensionMethod(target, '_checkNotifications', { Main, ...loadExtensionNotificationHelpers(target) });
+  const errors = [];
+  const Main = { notify: (title, body) => { if (failing) throw new Error('notification daemon unavailable'); notified.push({ title, body }); } };
+  const logger = message => errors.push(String(message));
+  const fn = loadExtensionMethod(target, '_checkNotifications', {
+    Main, ...loadExtensionNotificationHelpers(target), console: { error: logger }, log: logger,
+  });
   const self = {
     _notifyCache: { _config: { notifyDone }, sessions: {} },
     _notifyDone: notifyDone,
@@ -460,7 +464,26 @@ function makeExtensionNotifier(target, notifyDone) {
       fn.call(self, sessions);
       return notified.slice(before);
     },
+    errors,
+    cache: () => self._notifyCache.sessions,
   };
+}
+
+// A popup that fails to show is not recorded as notified (no false delivery evidence) and
+// is not retried on every scan.
+function testFailedNotificationIsNotRecordedAsDelivered() {
+  for (const target of EXTENSION_TARGETS) {
+    const ext = makeExtensionNotifier(target, false, { failing: true });
+    const session = status => ({ session_id: 'f', agent: 'opencode', status, title: 'T', cwd: '', reason: 'permission.asked:bash:rm x' });
+    ext.scan([session(STATUS.COOKING)]);
+    ext.scan([session(STATUS.YOUR_TURN)]);
+    assert.strictEqual(ext.cache().f.notifiedStatus, null, `${target}: failed popup not recorded as notified`);
+    assert.strictEqual(ext.cache().f.lastStatus, STATUS.YOUR_TURN, `${target}: last status advances`);
+    assert.strictEqual(ext.errors.length, 1, `${target}: failure logged once`);
+    assert.ok(!ext.errors[0].includes('rm x'), `${target}: log does not contain the notification text`);
+    ext.scan([session(STATUS.YOUR_TURN)]);
+    assert.strictEqual(ext.errors.length, 1, `${target}: not retried on every scan`);
+  }
 }
 
 // Untrusted reasons as adapters produce them: error messages with stack traces, commands
@@ -709,6 +732,7 @@ function run() {
   testExtensionNotificationParityWithTracker();
   testNotificationSanitizationParity();
   testMenuRowsAreSanitized();
+  testFailedNotificationIsNotRecordedAsDelivered();
   testNotificationSanitizerIsBounded();
   testSecretsAtTheCutoffAreDropped();
   testMalformedNotificationInputs();
