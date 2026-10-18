@@ -168,6 +168,18 @@ function formatNotificationBody(s) {
     return subject ? `${detail} • ${subject}` : detail;
 }
 
+// Text of one dropdown row. Agent-provided fields are cleaned like notification text, so
+// the menu never shows stack traces, command arguments of Your Turn requests or secrets.
+function formatSessionRow(s, meta, elapsed) {
+    const agent = cleanNotificationText(s.agent, 32) || 'agent';
+    const subject = cleanNotificationText(s.title || shortCwd(s.cwd), NOTIFY_SUBJECT_MAX);
+    const reason = notificationReason(s.status, s.reason);
+    return {
+        title: `${meta.emoji} [${agent}] ${subject}`,
+        subtitle: `${meta.label}${reason ? ': ' + reason : ''} • ${elapsed}${s.cwd ? ' • ' + shortCwd(s.cwd) : ''}`,
+    };
+}
+
 // Restrict a LetItCook-owned directory to owner-only (0700), querying and
 // setting attributes with NOFOLLOW_SYMLINKS so a link is never chmod-ed by path.
 function ensurePrivateDir(path) {
@@ -650,16 +662,14 @@ class LetItCookButton extends PanelMenu.Button {
             });
 
             const sMeta = STATUS_META[s.status] || STATUS_META[STATUS.UNKNOWN];
-            const titleText = `${sMeta.emoji} [${s.agent}] ${s.title || shortCwd(s.cwd)}`;
+            const row = formatSessionRow(s, sMeta, formatElapsed(now - s.updated_at));
             const titleLabel = new St.Label({
-                text: titleText,
+                text: row.title,
                 style_class: 'letitcook-session-title',
             });
 
-            const elapsed = formatElapsed(now - s.updated_at);
-            const subText = `${sMeta.label}${s.reason ? ': ' + s.reason : ''} • ${elapsed}${s.cwd ? ' • ' + shortCwd(s.cwd) : ''}`;
             const subLabel = new St.Label({
-                text: subText,
+                text: row.subtitle,
                 style_class: 'letitcook-session-subtitle',
             });
 
