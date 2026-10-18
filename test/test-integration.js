@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import { STATUS, aggregateState } from '../src/core/status.js';
+import { NotificationTracker } from '../src/core/notification.js';
 import {
   mapOpenCodeEvent,
   mapToolHook,
@@ -72,14 +73,14 @@ async function testFullOpenCodeLifecycle() {
     current = readAllSessionsFromDir(testDir);
     assert.strictEqual(aggregateState(current).status, STATUS.COOKING, 'Step 6 should be Cooking');
 
-    // Step 7: session.idle -> Done
+    // Step 7: session.idle does not prove successful completion
     state = mapOpenCodeEvent({
       type: 'session.idle',
       properties: { sessionID: 'e2e_ses_1' },
     }, state);
     writeSessionFile(state, testDir);
     current = readAllSessionsFromDir(testDir);
-    assert.strictEqual(aggregateState(current).status, STATUS.DONE, 'Step 7 should be Done');
+    assert.strictEqual(aggregateState(current).status, STATUS.UNKNOWN, 'Step 7 idle state should remain Unknown');
 
     // Step 8: Multi-session concurrency test
     // Add second session in cooking
@@ -161,4 +162,281 @@ async function testFullOpenCodeLifecycle() {
   }
 }
 
+function testOpenCodeIdleSignalsAreConservative() {
+  const cooking = { session_id: 'idle-test', status: STATUS.COOKING, agent: 'opencode' };
+  const waiting = { ...cooking, status: STATUS.YOUR_TURN };
+  const failed = { ...cooking, status: STATUS.BURN, reason: 'error:explicit failure' };
+  const completed = { ...cooking, status: STATUS.DONE, reason: 'status:done' };
+
+  for (const previous of [null, cooking, waiting]) {
+    const idle = mapOpenCodeEvent({
+      type: 'session.idle',
+      properties: { sessionID: 'idle-test' },
+    }, previous);
+    assert.strictEqual(idle.status, STATUS.UNKNOWN, 'session.idle without terminal evidence remains Unknown');
+  }
+
+  const burnAfterIdle = mapOpenCodeEvent({
+    type: 'session.idle', properties: { sessionID: 'idle-test' },
+  }, failed);
+  assert.strictEqual(burnAfterIdle.status, STATUS.BURN, 'idle must preserve an explicit Burn state');
+  assert.strictEqual(burnAfterIdle.reason, failed.reason, 'idle must preserve the failure reason');
+
+  const doneAfterIdle = mapOpenCodeEvent({
+    type: 'session.idle', properties: { sessionID: 'idle-test' },
+  }, completed);
+  assert.strictEqual(doneAfterIdle.status, STATUS.DONE, 'idle must preserve an already verified Done state');
+
+  assert.strictEqual(mapOpenCodeEvent({
+    type: 'session.status', properties: { sessionID: 'idle-test', status: 'idle' },
+  }).status, STATUS.UNKNOWN, 'idle status without prior evidence is Unknown');
+  assert.strictEqual(mapOpenCodeEvent({
+    type: 'session.status', properties: { sessionID: 'idle-test', status: 'idle' },
+  }, cooking).status, STATUS.COOKING, 'idle status does not infer Done');
+  assert.strictEqual(mapOpenCodeEvent({
+    type: 'session.compacted', properties: { sessionID: 'idle-test' },
+  }, waiting).status, STATUS.YOUR_TURN, 'compaction preserves prior known state rather than claiming completion');
+  assert.strictEqual(mapOpenCodeEvent({
+    type: 'session.compacted', properties: { sessionID: 'idle-test' },
+  }).status, STATUS.UNKNOWN, 'compaction without prior state is Unknown');
+}
+
+function testExplicitCompletionAndNotificationEvaluation() {
+  const sid = 'opencode-completion-test';
+  let state = mapOpenCodeEvent({
+    type: 'session.created',
+    properties: { sessionID: sid },
+  });
+  state = mapOpenCodeEvent({
+    type: 'message.updated',
+    properties: { info: { id: 'user-1', sessionID: sid, role: 'user' } },
+  }, state);
+  state = mapOpenCodeEvent({
+    type: 'message.updated',
+    properties: {
+      info: {
+        id: 'assistant-1', sessionID: sid, role: 'assistant', parentID: 'user-1',
+        finish: 'stop', time: { completed: Date.now() },
+      },
+    },
+  }, state);
+  assert.strictEqual(state.status, STATUS.COOKING, 'completion metadata alone waits for session idle');
+
+  state = mapOpenCodeEvent({
+    type: 'session.status',
+    properties: { sessionID: sid, status: { type: 'idle' } },
+  }, state);
+  assert.strictEqual(state.status, STATUS.DONE, 'completed assistant response followed by OpenCode idle is Done');
+  state = mapOpenCodeEvent({ type: 'session.idle', properties: { sessionID: sid } }, state);
+  assert.strictEqual(state.status, STATUS.DONE, 'the following session.idle preserves verified Done');
+
+  const tracker = new NotificationTracker({ notifyDone: true, suppressInitial: false });
+  tracker.processSessions([{ session_id: sid, agent: 'opencode', status: STATUS.COOKING }]);
+  const events = tracker.processSessions([state]);
+  assert.strictEqual(events.length, 1, 'verified completion reaches notification evaluation');
+  assert.strictEqual(events[0].session.status, STATUS.DONE);
+
+  let withTool = mapOpenCodeEvent({ type: 'session.created', properties: { sessionID: sid } });
+  withTool = mapOpenCodeEvent({
+    type: 'message.updated', properties: { info: { id: 'user-2', sessionID: sid, role: 'user' } },
+  }, withTool);
+  withTool = mapOpenCodeEvent({
+    type: 'message.part.updated',
+    properties: { part: { id: 'tool-part', sessionID: sid, messageID: 'assistant-2', type: 'tool' } },
+  }, withTool);
+  withTool = mapOpenCodeEvent({
+    type: 'message.updated',
+    properties: {
+      info: {
+        id: 'assistant-2', sessionID: sid, role: 'assistant', parentID: 'user-2',
+        finish: 'stop', time: { completed: Date.now() },
+      },
+    },
+  }, withTool);
+  withTool = mapOpenCodeEvent({
+    type: 'session.status', properties: { sessionID: sid, status: { type: 'idle' } },
+  }, withTool);
+assert.strictEqual(withTool.status, STATUS.COOKING, 'finish stop with tool parts is not successful completion');
+  assert.strictEqual(mapOpenCodeEvent({
+    type: 'session.idle',
+    properties: { sessionID: sid },
+  }, withTool).status, STATUS.UNKNOWN, 'tool-call completion evidence cannot make idle Done');
+}
+
+function testMessageCompletionRaceConditions() {
+  const sid = 'opencode-race-test';
+
+  // Scenario: Assistant message arrives with completion evidence, then session.idle event
+  let state = mapOpenCodeEvent({ type: 'session.created', properties: { sessionID: sid } });
+  assert.strictEqual(state.status, STATUS.COOKING, 'session.created is COOKING');
+
+  // User message
+  state = mapOpenCodeEvent({
+    type: 'message.updated',
+    properties: { info: { id: 'user-1', sessionID: sid, role: 'user' } },
+  }, state);
+  assert.strictEqual(state.status, STATUS.COOKING, 'user message received');
+
+  // Assistant message with completion metadata
+  const now = Date.now();
+  state = mapOpenCodeEvent({
+    type: 'message.updated',
+    properties: {
+      info: {
+        id: 'assistant-1', sessionID: sid, role: 'assistant', parentID: 'user-1',
+        finish: 'stop', time: { completed: now },
+      },
+    },
+  }, state);
+  assert.strictEqual(state.status, STATUS.COOKING, 'completion metadata alone');
+  assert.strictEqual(state._completionCandidate, true, 'completion candidate must be set');
+
+  // Preserve candidate through session.updated (intermediate event)
+  state = mapOpenCodeEvent({ type: 'session.updated', properties: {} }, state);
+  assert.strictEqual(state._completionCandidate, true, 'session.updated preserves valid candidate');
+
+  // Add a legitimate session.idle - DONE should be established and preserved
+  state = mapOpenCodeEvent({
+    type: 'session.idle',
+    properties: { sessionID: sid },
+  }, state);
+  assert.strictEqual(state.status, STATUS.DONE, 'legitimate idle establishes DONE');
+  assert.strictEqual(state._completionCandidate, false, 'session.idle clears candidate for next cycle');
+
+  // Subsequent user message and assistant message should start fresh cycle
+  state = mapOpenCodeEvent({
+    type: 'message.updated',
+    properties: { info: { id: 'user-2', sessionID: sid, role: 'user' } },
+  }, state);
+  assert.strictEqual(state.status, STATUS.COOKING, 'new cycle must start fresh');
+  assert.strictEqual(state._lastUserMessageId, 'user-2', 'new user ID must be tracked');
+  assert.strictEqual(state._completionCandidate, false, 'cycle must start without completion evidence');
+
+  // Assistant message with completion metadata should NOT be accepted (no valid parent)
+  state = mapOpenCodeEvent({
+    type: 'message.updated',
+    properties: {
+      info: {
+        id: 'assistant-2', sessionID: sid, role: 'assistant', parentID: 'user-1',
+        finish: 'stop', time: { completed: Date.now() },
+      },
+    },
+  }, state);
+  assert.strictEqual(state.status, STATUS.COOKING, 'orphaned completion must not be accepted');
+  assert.strictEqual(state._completionCandidate, false, 'orphaned completion must not be accepted');
+}
+
+function testExplicitSessionStatusIdleAfterUserRequest() {
+  const sid = 'opencode-status-idle-test';
+
+  // Scenario: session.status("idle") is sent WITHOUT completion candidate
+  let state = mapOpenCodeEvent({ type: 'session.created', properties: { sessionID: sid } });
+  assert.strictEqual(state.status, STATUS.COOKING, 'session.created');
+
+  // Direct session.status idle (no candidate) does not infer Done
+  state = mapOpenCodeEvent({
+    type: 'session.status',
+    properties: { sessionID: sid, status: { type: 'idle' } },
+  }, state);
+  assert.strictEqual(state.status, STATUS.COOKING, 'idle status without candidate does not infer Done');
+
+  // session.idle without candidate becomes Unknown
+  state = mapOpenCodeEvent({
+    type: 'session.idle',
+    properties: { sessionID: sid },
+  }, state);
+  assert.strictEqual(state.status, STATUS.UNKNOWN, 'session.idle without valid completion evidence is Unknown');
+}
+
+function testUserMessageDiffSummaryPreservesCompletionCandidate() {
+  const sid = 'opencode-summary-race-test';
+
+  // 1. Session created
+  let state = mapOpenCodeEvent({ type: 'session.created', properties: { sessionID: sid } });
+
+  // 2. Initial user message
+  state = mapOpenCodeEvent({
+    type: 'message.updated',
+    properties: { info: { id: 'msg_user_1', sessionID: sid, role: 'user' } },
+  }, state);
+  assert.strictEqual(state.status, STATUS.COOKING);
+  assert.strictEqual(state._lastUserMessageId, 'msg_user_1');
+
+  // 3. Assistant completes with finish: stop
+  state = mapOpenCodeEvent({
+    type: 'message.updated',
+    properties: {
+      info: {
+        id: 'msg_asst_1', sessionID: sid, role: 'assistant', parentID: 'msg_user_1',
+        finish: 'stop', time: { completed: Date.now() },
+      },
+    },
+  }, state);
+  assert.strictEqual(state.status, STATUS.COOKING);
+  assert.strictEqual(state._completionCandidate, true, 'candidate set awaiting idle');
+
+  // 4. OpenCode forks background fiber for SessionSummary.summarize, emitting message.updated
+  // for the SAME user message id with summary diffs BEFORE idle.
+  state = mapOpenCodeEvent({
+    type: 'message.updated',
+    properties: {
+      info: {
+        id: 'msg_user_1', sessionID: sid, role: 'user', summary: { diffs: [] },
+      },
+    },
+  }, state);
+  assert.strictEqual(state.status, STATUS.COOKING, 'existing user message update must not reset cooking turn');
+  assert.strictEqual(state._completionCandidate, true, 'candidate must survive late user message diff summary');
+
+  // 5. session.status idle arrives
+  state = mapOpenCodeEvent({
+    type: 'session.status',
+    properties: { sessionID: sid, status: { type: 'idle' } },
+  }, state);
+  assert.strictEqual(state.status, STATUS.DONE, 'status reaches Done upon idle with preserved candidate');
+
+  // 6. session.idle arrives
+  state = mapOpenCodeEvent({
+    type: 'session.idle',
+    properties: { sessionID: sid },
+  }, state);
+  assert.strictEqual(state.status, STATUS.DONE, 'session.idle preserves Done');
+
+  // 7. Late user message summary arrives AFTER session has already transitioned to Done
+  state = mapOpenCodeEvent({
+    type: 'message.updated',
+    properties: {
+      info: {
+        id: 'msg_user_1', sessionID: sid, role: 'user', summary: { diffs: [] },
+      },
+    },
+  }, state);
+  assert.strictEqual(state.status, STATUS.DONE, 'late user message diff summary must NOT overwrite Done back to Cooking');
+
+  // 8. Genuine new user prompt begins a new turn
+  state = mapOpenCodeEvent({
+    type: 'message.updated',
+    properties: {
+      info: {
+        id: 'msg_user_2', sessionID: sid, role: 'user',
+      },
+    },
+  }, state);
+  assert.strictEqual(state.status, STATUS.COOKING, 'new user message starts new cooking turn');
+  assert.strictEqual(state._lastUserMessageId, 'msg_user_2');
+  assert.strictEqual(state._completionCandidate, false, 'new turn resets candidate');
+}
+
+function testGlobalNonSessionEventsIgnored() {
+  assert.strictEqual(mapOpenCodeEvent({ type: 'plugin.added', properties: {} }), null);
+  assert.strictEqual(mapOpenCodeEvent({ type: 'catalog.updated', properties: {} }), null);
+  assert.strictEqual(mapOpenCodeEvent({ type: 'session.status', properties: { sessionID: 'global' } }), null);
+}
+
+testOpenCodeIdleSignalsAreConservative();
+testExplicitCompletionAndNotificationEvaluation();
+testMessageCompletionRaceConditions();
+testExplicitSessionStatusIdleAfterUserRequest();
+testUserMessageDiffSummaryPreservesCompletionCandidate();
+testGlobalNonSessionEventsIgnored();
 testFullOpenCodeLifecycle();

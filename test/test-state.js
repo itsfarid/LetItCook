@@ -177,12 +177,12 @@ function testOpenCodeEventMapping() {
   }, evPermReply);
   assert.strictEqual(evMsg.status, STATUS.COOKING);
 
-  // session.idle -> Done
+  // session.idle -> Unknown (idle is not proof of completion)
   const evIdle = mapOpenCodeEvent({
     type: 'session.idle',
     properties: { sessionID: 'ses_1' },
   }, evMsg);
-  assert.strictEqual(evIdle.status, STATUS.DONE);
+  assert.strictEqual(evIdle.status, STATUS.UNKNOWN);
 
   // session.error -> Burn
   const evError = mapOpenCodeEvent({

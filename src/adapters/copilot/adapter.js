@@ -3,6 +3,7 @@ import path from 'node:path';
 import os from 'node:os';
 import { STATUS, normalizeSession, isValidStatus } from '../../core/status.js';
 import { BaseAdapter } from '../base.js';
+import { isValidSessionId, ensurePrivateDir } from '../../core/fs-safe.js';
 
 export function getCopilotStateDir(overrideDir) {
   if (overrideDir) return overrideDir;
@@ -242,7 +243,9 @@ export function readSessionFromDir(sessionDirPath, options = {}) {
     } catch {}
   }
 
-  const sessionId = wsMeta.id || path.basename(sessionDirPath);
+  const candidates = [wsMeta.id, path.basename(sessionDirPath)];
+  const sessionId = candidates.find(isValidSessionId);
+  if (!sessionId) return null;
   const cwd = wsMeta.cwd || '';
   const title = wsMeta.name || wsMeta.summary || '';
   const createdAt = wsMeta.created_at ? new Date(wsMeta.created_at).getTime() : Date.now();
@@ -285,7 +288,11 @@ export function readSessionFromDir(sessionDirPath, options = {}) {
     } catch {}
   }
 
-  return normalizeSession(state, options);
+  const normalized = normalizeSession(state, options);
+  if (!isValidSessionId(normalized.session_id)) {
+    normalized.session_id = sessionId;
+  }
+  return normalized;
 }
 
 export class CopilotAdapter extends BaseAdapter {
@@ -331,6 +338,7 @@ export class CopilotAdapter extends BaseAdapter {
   }
 
   getSessionState(sessionId, options = {}) {
+    if (!isValidSessionId(sessionId)) return null;
     const baseDir = getCopilotStateDir(options.copilotDir);
     const sessionDir = path.join(baseDir, 'session-state', sessionId);
     if (!fs.existsSync(sessionDir)) return null;
@@ -339,7 +347,7 @@ export class CopilotAdapter extends BaseAdapter {
 
   syncToStateDir(targetStateDir, options = {}) {
     const sessions = this.detectSessions(options);
-    fs.mkdirSync(targetStateDir, { recursive: true });
+    ensurePrivateDir(targetStateDir);
 
     // Freshness policy: only sync sessions worth glancing at.
     // - stale sessions (too old to trust) are never written
@@ -348,6 +356,7 @@ export class CopilotAdapter extends BaseAdapter {
     const now = options.now || Date.now();
     const maxAgeMs = options.maxAgeMs || 60 * 60 * 1000;
     const live = sessions.filter(s => {
+      if (!isValidSessionId(s.session_id)) return false;
       if (s.stale) return false;
       if (s.status !== STATUS.COOKING && s.status !== STATUS.YOUR_TURN) {
         return (now - s.updated_at) <= maxAgeMs;

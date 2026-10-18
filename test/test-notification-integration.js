@@ -131,6 +131,29 @@ function testFilesystemNotificationFlow() {
     assert.strictEqual(doneEvents.length, 1, 'Opt-in Done must notify when transitioning from cooking');
     assert.strictEqual(doneEvents[0].urgency, 'normal');
 
+    // 6b. Subsequent genuine completion after resuming cooking produces new notification
+    writeSessionFile({
+      session_id: 'sess-2',
+      agent: 'copilot',
+      status: STATUS.COOKING,
+      updated_at: Date.now() + 10,
+    }, sessionDir);
+    sessions = readAllSessionsFromDir(sessionDir);
+    const resumeEvents = doneTracker.processSessions(sessions);
+    assert.strictEqual(resumeEvents.length, 0, 'Resumed cooking must not notify');
+
+    writeSessionFile({
+      session_id: 'sess-2',
+      agent: 'copilot',
+      status: STATUS.DONE,
+      title: 'Tests passed again',
+      updated_at: Date.now() + 20,
+    }, sessionDir);
+    sessions = readAllSessionsFromDir(sessionDir);
+    const secondDoneEvents = doneTracker.processSessions(sessions);
+    assert.strictEqual(secondDoneEvents.length, 1, 'Subsequent genuine completion must notify');
+    assert.strictEqual(secondDoneEvents[0].reason, 'done');
+
     // 7. Untrustworthy / corrupt session file: must NOT notify
     fs.writeFileSync(path.join(sessionDir, 'corrupt.json'), '{ invalid json @@', 'utf8');
     sessions = readAllSessionsFromDir(sessionDir);
@@ -161,14 +184,108 @@ function testFilesystemNotificationFlow() {
   }
 }
 
+function testRunNotifyCannotConsumePendingNotification() {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'letitcook-run-notify-ro-'));
+  const sessionDir = path.join(tmpDir, 'sessions');
+  const cachePath = path.join(tmpDir, 'state', 'letitcook', 'notify_cache.json');
+  fs.mkdirSync(sessionDir, { recursive: true });
+  fs.mkdirSync(path.dirname(cachePath), { recursive: true });
+  try {
+    fs.writeFileSync(cachePath, JSON.stringify({
+      _config: { notifyDone: true },
+      sessions: { pending: { lastStatus: STATUS.COOKING, notifiedStatus: null } },
+    }));
+    fs.chmodSync(path.dirname(cachePath), 0o755);
+    fs.chmodSync(cachePath, 0o644);
+    writeSessionFile({
+      session_id: 'pending', agent: 'opencode', status: STATUS.BURN,
+      reason: 'test failure', updated_at: Date.now(),
+    }, sessionDir);
+    const old = new Date(Date.now() - 60_000);
+    fs.utimesSync(cachePath, old, old);
+    const before = {
+      content: fs.readFileSync(cachePath, 'utf8'),
+      fileMode: fs.statSync(cachePath).mode & 0o777,
+      dirMode: fs.statSync(path.dirname(cachePath)).mode & 0o777,
+      mtime: fs.statSync(cachePath).mtimeMs,
+    };
+
+    const first = runNotify({ sessionDir, cachePath });
+    const second = runNotify({ sessionDir, cachePath });
+    assert.strictEqual(first.eventsCount, 1);
+    assert.strictEqual(second.eventsCount, 1, 'repeated inspection must not consume pending event');
+    assert.strictEqual(first.notifyDone, true);
+    assert.deepStrictEqual({
+      content: fs.readFileSync(cachePath, 'utf8'),
+      fileMode: fs.statSync(cachePath).mode & 0o777,
+      dirMode: fs.statSync(path.dirname(cachePath)).mode & 0o777,
+      mtime: fs.statSync(cachePath).mtimeMs,
+    }, before);
+
+    // --watch reuses a read-only tracker, deduplicating in memory only.
+    const watchTracker = new NotificationTracker({ cachePath, suppressInitial: false, readOnly: true });
+    assert.strictEqual(runNotify({ sessionDir, cachePath, tracker: watchTracker }).eventsCount, 1);
+    assert.strictEqual(runNotify({ sessionDir, cachePath, tracker: watchTracker }).eventsCount, 0);
+    assert.deepStrictEqual({
+      content: fs.readFileSync(cachePath, 'utf8'),
+      fileMode: fs.statSync(cachePath).mode & 0o777,
+      dirMode: fs.statSync(path.dirname(cachePath)).mode & 0o777,
+      mtime: fs.statSync(cachePath).mtimeMs,
+    }, before, 'watch deduplication stays in memory');
+
+    const extensionTracker = new NotificationTracker({ cachePath, suppressInitial: false });
+    assert.strictEqual(extensionTracker.processSessions(readAllSessionsFromDir(sessionDir)).length, 1,
+      'the extension writer can still process the pending notification');
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+}
+
 function testCliProcessExecution() {
   const notifyScript = path.resolve('src/notify.js');
+  const isolated = fs.mkdtempSync(path.join(os.tmpdir(), 'letitcook-notify-cli-'));
+  const env = {
+    ...process.env,
+    HOME: isolated,
+    XDG_STATE_HOME: path.join(isolated, 'state'),
+    XDG_DATA_HOME: path.join(isolated, 'data'),
+  };
 
-  // Default one-shot runs cleanly with exit 0 and outputs valid JSON
-  const stdout = execFileSync('node', [notifyScript], { encoding: 'utf8' });
+  try {
+  const cachePath = path.join(env.XDG_STATE_HOME, 'letitcook', 'notify_cache.json');
+  fs.mkdirSync(path.dirname(cachePath), { recursive: true });
+  fs.writeFileSync(cachePath, JSON.stringify({ _config: { notifyDone: true }, sessions: {} }));
+  fs.chmodSync(path.dirname(cachePath), 0o755);
+  fs.chmodSync(cachePath, 0o644);
+  const old = new Date(Date.now() - 60_000);
+  fs.utimesSync(cachePath, old, old);
+  const before = {
+    content: fs.readFileSync(cachePath, 'utf8'),
+    mode: fs.statSync(cachePath).mode & 0o777,
+    dirMode: fs.statSync(path.dirname(cachePath)).mode & 0o777,
+    mtime: fs.statSync(cachePath).mtimeMs,
+  };
+
+  // Default one-shot runs cleanly with exit 0 and outputs JSON without cache mutations.
+  const stdout = execFileSync('node', [notifyScript], { encoding: 'utf8', env });
   const parsed = JSON.parse(stdout);
   assert.strictEqual(parsed.ok, true);
   assert.strictEqual(parsed.owner, 'gnome-extension');
+  assert.deepStrictEqual({
+    content: fs.readFileSync(cachePath, 'utf8'),
+    mode: fs.statSync(cachePath).mode & 0o777,
+    dirMode: fs.statSync(path.dirname(cachePath)).mode & 0o777,
+    mtime: fs.statSync(cachePath).mtimeMs,
+  }, before, 'CLI process inspection must not alter cache contents, permissions, or mtime');
+
+  // --include-done is an inspection-only override and is also read-only.
+  execFileSync('node', [notifyScript, '--include-done'], { encoding: 'utf8', env });
+  assert.deepStrictEqual({
+    content: fs.readFileSync(cachePath, 'utf8'),
+    mode: fs.statSync(cachePath).mode & 0o777,
+    dirMode: fs.statSync(path.dirname(cachePath)).mode & 0o777,
+    mtime: fs.statSync(cachePath).mtimeMs,
+  }, before);
 
   // --dispatch must exit non-zero (exit code 1) to prevent competing dispatch
   let dispatchFailed = false;
@@ -181,11 +298,296 @@ function testCliProcessExecution() {
     assert.ok(stderr.includes('unsupported'), 'Error output must state that dispatch is unsupported');
   }
   assert.strictEqual(dispatchFailed, true, '--dispatch must fail execution');
+
+  fs.unlinkSync(cachePath);
+  execFileSync('node', [notifyScript], { encoding: 'utf8', env });
+  assert.strictEqual(fs.existsSync(cachePath), false, 'inspection must not create a missing cache');
+  } finally {
+    fs.rmSync(isolated, { recursive: true, force: true });
+  }
+}
+
+function testTerminatedSessionNotificationEvaluationAndCleanup() {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'letitcook-term-int-'));
+  const sessionDir = path.join(tmpDir, 'sessions');
+  const cachePath = path.join(tmpDir, 'notify_cache.json');
+  fs.mkdirSync(sessionDir, { recursive: true });
+
+  const deadPid = 99999999;
+
+  try {
+    const tracker = new NotificationTracker({
+      cachePath,
+      notifyDone: true,
+      suppressInitial: false,
+    });
+
+    // 1. Session begins Cooking
+    writeSessionFile({
+      session_id: 'term-sess-1',
+      agent: 'opencode',
+      status: STATUS.COOKING,
+      title: 'Run migrations',
+      pid: deadPid,
+      updated_at: Date.now(),
+    }, sessionDir);
+
+    let sessions = readAllSessionsFromDir(sessionDir);
+    tracker.processSessions(sessions);
+
+    // 2. Session finishes Done, and process exits (PID becomes dead)
+    writeSessionFile({
+      session_id: 'term-sess-1',
+      agent: 'opencode',
+      status: STATUS.DONE,
+      title: 'Run migrations',
+      pid: deadPid,
+      updated_at: Date.now(),
+    }, sessionDir);
+
+    // Simulate extension lifecycle scan:
+    // Read sessions with dead PID detection: Done with dead PID is flagged terminated
+    const isPidAlive = (pid) => pid !== deadPid;
+    const scannedSessions = fs.readdirSync(sessionDir)
+      .filter(f => f.endsWith('.json') && !f.startsWith('.'))
+      .map(f => {
+        const fullPath = path.join(sessionDir, f);
+        const raw = JSON.parse(fs.readFileSync(fullPath, 'utf8'));
+        const hasPid = typeof raw.pid === 'number';
+        const alive = hasPid ? isPidAlive(raw.pid) : true;
+        let terminated = false;
+        if (hasPid && !alive) {
+          if (raw.status === STATUS.DONE || raw.status === STATUS.BURN) {
+            terminated = true;
+          }
+        }
+        return {
+          ...raw,
+          filePath: fullPath,
+          terminated,
+        };
+      });
+
+    assert.strictEqual(scannedSessions.length, 1);
+    assert.strictEqual(scannedSessions[0].terminated, true);
+
+    // Evaluate notification BEFORE file deletion
+    const events = tracker.processSessions(scannedSessions);
+    assert.strictEqual(events.length, 1, 'Terminated Done session must be evaluated and emit notification before deletion');
+    assert.strictEqual(events[0].session.session_id, 'term-sess-1');
+    assert.strictEqual(events[0].reason, 'done');
+
+    // Clean up terminated session files after evaluation
+    for (const s of scannedSessions) {
+      if (s.terminated && s.filePath) {
+        fs.unlinkSync(s.filePath);
+      }
+    }
+
+    // File must now be removed from disk
+    assert.strictEqual(fs.existsSync(path.join(sessionDir, 'term-sess-1.json')), false, 'Terminated session file must be cleaned up');
+
+    // Next scan: file is gone, so 0 duplicate notifications
+    const nextSessions = fs.readdirSync(sessionDir)
+      .filter(f => f.endsWith('.json') && !f.startsWith('.'))
+      .map(f => JSON.parse(fs.readFileSync(path.join(sessionDir, f), 'utf8')));
+    const nextEvents = tracker.processSessions(nextSessions);
+    assert.strictEqual(nextEvents.length, 0, 'No duplicate notifications on subsequent scan after file cleanup');
+
+    // 3. Repeat for Burn with dead PID: Cooking -> Burn -> notify -> clean up
+    writeSessionFile({
+      session_id: 'term-sess-2',
+      agent: 'opencode',
+      status: STATUS.COOKING,
+      pid: deadPid,
+      updated_at: Date.now(),
+    }, sessionDir);
+    let s2List = [{ session_id: 'term-sess-2', agent: 'opencode', status: STATUS.COOKING, pid: deadPid }];
+    tracker.processSessions(s2List);
+
+    writeSessionFile({
+      session_id: 'term-sess-2',
+      agent: 'opencode',
+      status: STATUS.BURN,
+      reason: 'Syntax error',
+      pid: deadPid,
+      updated_at: Date.now(),
+    }, sessionDir);
+
+    const burnScanned = [{
+      session_id: 'term-sess-2',
+      agent: 'opencode',
+      status: STATUS.BURN,
+      reason: 'Syntax error',
+      pid: deadPid,
+      filePath: path.join(sessionDir, 'term-sess-2.json'),
+      terminated: true,
+    }];
+
+    const burnEvents = tracker.processSessions(burnScanned);
+    assert.strictEqual(burnEvents.length, 1, 'Terminated Burn session must emit notification before deletion');
+    assert.strictEqual(burnEvents[0].reason, 'burn');
+
+    for (const s of burnScanned) {
+      if (s.terminated && s.filePath) {
+        fs.unlinkSync(s.filePath);
+      }
+    }
+    assert.strictEqual(fs.existsSync(path.join(sessionDir, 'term-sess-2.json')), false);
+
+    // 4. Cooking crash (PID dies during Cooking): must NOT infer Done or Burn
+    writeSessionFile({
+      session_id: 'term-sess-3',
+      agent: 'opencode',
+      status: STATUS.COOKING,
+      pid: deadPid,
+      updated_at: Date.now(),
+    }, sessionDir);
+
+    const crashedScanned = [{
+      session_id: 'term-sess-3',
+      agent: 'opencode',
+      status: STATUS.UNKNOWN, // Crash maps to Unknown
+      stale: true,
+      pid: deadPid,
+      filePath: path.join(sessionDir, 'term-sess-3.json'),
+      terminated: false, // Not cleanly terminated
+    }];
+
+    const crashEvents = tracker.processSessions(crashedScanned);
+    assert.strictEqual(crashEvents.length, 0, 'Process crash during cooking must never infer Done or Burn or notify');
+    assert.ok(fs.existsSync(path.join(sessionDir, 'term-sess-3.json')), 'Crashed session file must remain visible as unknown');
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+}
+
+function makeIsolatedState() {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'letitcook-readonly-'));
+  const sessionDir = path.join(tmpDir, 'sessions');
+  const stateHome = path.join(tmpDir, 'state');
+  const cachePath = path.join(stateHome, 'letitcook', 'notify_cache.json');
+  fs.mkdirSync(sessionDir, { recursive: true });
+  fs.mkdirSync(path.dirname(cachePath), { recursive: true });
+  return { tmpDir, sessionDir, stateHome, cachePath };
+}
+
+function snapshot(cachePath) {
+  return { content: fs.readFileSync(cachePath, 'utf8'), mtimeMs: fs.statSync(cachePath).mtimeMs };
+}
+
+function testCliInspectionIsReadOnly() {
+  const { tmpDir, sessionDir, cachePath } = makeIsolatedState();
+  try {
+    // Cache says sess-1 was cooking and notifyDone is opted in; session now needs the user.
+    fs.writeFileSync(cachePath, JSON.stringify({
+      _config: { notifyDone: true },
+      sessions: { 'sess-1': { lastStatus: STATUS.COOKING, notifiedStatus: null, updatedAt: 1 } },
+    }, null, 2), 'utf8');
+    const old = new Date(Date.now() - 60_000);
+    fs.utimesSync(cachePath, old, old);
+    writeSessionFile({
+      session_id: 'sess-1', agent: 'opencode', status: STATUS.YOUR_TURN,
+      reason: 'Confirm', updated_at: Date.now(),
+    }, sessionDir);
+
+    const before = snapshot(cachePath);
+    const dirListingBefore = fs.readdirSync(path.dirname(cachePath)).sort();
+
+    // Repeated inspection reports the pending event every time and never consumes it.
+    for (let i = 0; i < 3; i++) {
+      const result = runNotify({ sessionDir, cachePath });
+      assert.strictEqual(result.ok, true);
+      assert.strictEqual(result.dispatched, false);
+      assert.strictEqual(result.eventsCount, 1, `inspection #${i} must still see the pending notification`);
+      assert.strictEqual(result.notifyDone, true, 'persisted notifyDone is reported, not overwritten');
+    }
+
+    // One-off override and fresh-cache variants must not write either.
+    runNotify({ sessionDir, cachePath, notifyDone: true });
+    runNotify({ sessionDir, cachePath, suppressInitial: true });
+
+    const after = snapshot(cachePath);
+    assert.strictEqual(after.content, before.content, 'cache contents must be unchanged');
+    assert.strictEqual(after.mtimeMs, before.mtimeMs, 'cache mtime must be unchanged');
+    assert.deepStrictEqual(fs.readdirSync(path.dirname(cachePath)).sort(), dirListingBefore, 'no temp files left');
+    assert.strictEqual(JSON.parse(after.content)._config.notifyDone, true);
+
+    // The extension (a writing tracker) can still deliver the notification afterwards.
+    const extensionTracker = new NotificationTracker({ cachePath, suppressInitial: false });
+    const delivered = extensionTracker.processSessions(readAllSessionsFromDir(sessionDir));
+    assert.strictEqual(delivered.length, 1, 'extension must still deliver after CLI inspection');
+
+    // And now that it was delivered, inspection reports nothing further.
+    assert.strictEqual(runNotify({ sessionDir, cachePath }).eventsCount, 0);
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+}
+
+function testCliInspectionWithoutCacheDoesNotCreateIt() {
+  const { tmpDir, sessionDir, cachePath } = makeIsolatedState();
+  try {
+    writeSessionFile({
+      session_id: 's', agent: 'opencode', status: STATUS.BURN, updated_at: Date.now(),
+    }, sessionDir);
+    const result = runNotify({ sessionDir, cachePath });
+    assert.strictEqual(result.ok, true);
+    assert.strictEqual(fs.existsSync(cachePath), false, 'inspection must not create the cache');
+    assert.strictEqual(result.notifyDone, false);
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+}
+
+function testCliProcessIsReadOnlyAndDispatchTest() {
+  const { tmpDir, sessionDir, stateHome, cachePath } = makeIsolatedState();
+  const notifyScript = path.resolve('src/notify.js');
+  const env = { ...process.env, XDG_STATE_HOME: stateHome, HOME: tmpDir, XDG_DATA_HOME: path.join(tmpDir, 'data') };
+  try {
+    fs.writeFileSync(cachePath, JSON.stringify({ _config: { notifyDone: true }, sessions: {} }), 'utf8');
+    const old = new Date(Date.now() - 60_000);
+    fs.utimesSync(cachePath, old, old);
+    const before = snapshot(cachePath);
+
+    for (const args of [[], ['--include-done']]) {
+      const out = JSON.parse(execFileSync('node', [notifyScript, ...args], { encoding: 'utf8', env }));
+      assert.strictEqual(out.ok, true);
+      assert.strictEqual(out.cachePath, cachePath, 'CLI must use the isolated cache');
+    }
+    const after = snapshot(cachePath);
+    assert.deepStrictEqual(after, before, 'CLI process must not touch the cache');
+
+    // --dispatch still fails safely and does not touch the cache.
+    assert.throws(
+      () => execFileSync('node', [notifyScript, '--dispatch'], { stdio: 'pipe', env }),
+      err => err.status === 1 && err.stderr.toString().includes('unsupported'),
+    );
+    assert.deepStrictEqual(snapshot(cachePath), before);
+
+    // --test stays a manual notify-send test: prints a payload, exits 0, writes no cache.
+    // PATH is emptied so no real desktop notification is sent; sent must be false.
+    const testOut = JSON.parse(execFileSync(process.execPath, [notifyScript, '--test', STATUS.BURN], {
+      encoding: 'utf8', env: { ...env, PATH: '' },
+    }));
+    assert.strictEqual(testOut.ok, true);
+    assert.strictEqual(testOut.test, true);
+    assert.strictEqual(testOut.sent, false);
+    assert.strictEqual(testOut.payload.urgency, 'critical');
+    assert.deepStrictEqual(snapshot(cachePath), before);
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
 }
 
 function run() {
   testFilesystemNotificationFlow();
+  testCliInspectionIsReadOnly();
+  testCliInspectionWithoutCacheDoesNotCreateIt();
+  testCliProcessIsReadOnlyAndDispatchTest();
+  testRunNotifyCannotConsumePendingNotification();
   testCliProcessExecution();
+  testTerminatedSessionNotificationEvaluationAndCleanup();
   console.log('All LetItCook notification integration tests passed.');
 }
 
