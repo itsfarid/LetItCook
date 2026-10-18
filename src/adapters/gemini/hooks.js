@@ -16,7 +16,7 @@ export const geminiHooks = {
   binEnv: 'GEMINI_BIN',
   // Hook events LetItCook registers for. BeforeModel/AfterModel are left out: AfterModel
   // fires for every streamed chunk.
-  events: ['BeforeAgent', 'BeforeTool', 'AfterTool'],
+  events: ['BeforeAgent', 'BeforeTool', 'AfterTool', 'Notification', 'AfterAgent', 'SessionEnd'],
 
   // Settings block for ~/.gemini/settings.json. Gemini timeouts are in milliseconds; the
   // name lets the user disable the hook with /hooks or hooksConfig.disabled.
@@ -38,9 +38,33 @@ export const geminiHooks = {
     switch (event) {
       case 'BeforeAgent':
         return [{ ...base, type: SIGNAL.TURN_START }];
+      // BeforeTool runs before the tool's confirmation, so it never resolves a request.
       case 'BeforeTool':
-      case 'AfterTool':
         return [{ ...base, type: SIGNAL.ACTIVITY, reason: `tool:${tool}` }];
+      // Gemini executes no tool of a batch while any of its calls awaits approval (the
+      // scheduler waits until every call is scheduled or finished), so a tool finishing
+      // means the waiting confirmation was answered. Notifications carry no tool call id,
+      // so this resolves every waiting request.
+      case 'AfterTool':
+        return [
+          { ...base, type: SIGNAL.REQUEST_CLOSE },
+          { ...base, type: SIGNAL.ACTIVITY, reason: `tool:${tool}` },
+        ];
+      // The only notification type is ToolPermission: a tool waits for confirmation. The
+      // ask_user tool asks its question through the same confirmation.
+      case 'Notification': {
+        if (input.notification_type !== 'ToolPermission') return [];
+        const kind = label(input.details && input.details.type, 'tool');
+        const reason = kind === 'ask_user' ? 'question' : `permission:${kind}`;
+        return [{ ...base, type: SIGNAL.REQUEST_OPEN, requestId: 'confirmation', reason }];
+      }
+      // AfterAgent fires when a prompt's turn is over, whether it succeeded, failed (API
+      // error, loop detection, turn limit) or was cancelled while the model streamed. It
+      // has no outcome field, so the turn is handed back without claiming Done or Burn.
+      case 'AfterAgent':
+        return [{ ...base, type: SIGNAL.TURN_END, reason: 'turn ended' }];
+      case 'SessionEnd':
+        return [{ ...base, type: SIGNAL.SESSION_END }];
       default:
         return [];
     }
