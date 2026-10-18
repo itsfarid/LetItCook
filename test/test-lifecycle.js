@@ -237,9 +237,12 @@ function testDeadPidUnknownExpiresAfterRetention() {
     assert.strictEqual(oldAlive.terminated, false, `${status}: live process is never expired`);
   }
 
-  // Without a PID (Copilot) or without a liveness probe nothing is expired here.
+  // Without a PID there is no liveness to check: the session is removed one hour after its
+  // last update (whatever the probe says), and kept before that.
   const noPid = normalizeSession({ session_id: 'np', status: STATUS.UNKNOWN, updated_at: now - 5 * hour }, { now, isPidAlive: dead });
-  assert.strictEqual(noPid.terminated, false, 'PID-less sessions are not expired by liveness');
+  assert.strictEqual(noPid.terminated, true, 'PID-less sessions are removed an hour after their last update');
+  const noPidRecent = normalizeSession({ session_id: 'np2', status: STATUS.UNKNOWN, updated_at: now - 30 * 60 * 1000 }, { now, isPidAlive: dead });
+  assert.strictEqual(noPidRecent.terminated, false, 'PID-less sessions are kept within the hour');
   const noProbe = normalizeSession({ session_id: 'nq', status: STATUS.UNKNOWN, pid: 999, updated_at: now - 5 * hour }, { now });
   assert.strictEqual(noProbe.terminated, false, 'no liveness probe => no expiry');
 

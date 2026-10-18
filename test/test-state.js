@@ -72,6 +72,18 @@ function testNormalizeSingleSession() {
   assert.strictEqual(orphanedYourTurn.status, STATUS.UNKNOWN);
   assert.strictEqual(orphanedYourTurn.stale, true);
 
+  // 5b. Without a process to watch, any session is removed one hour after its last update
+  for (const status of [STATUS.YOUR_TURN, STATUS.COOKING, STATUS.DONE, STATUS.BURN]) {
+    const orphan = normalizeSession({ session_id: 's4b', status, updated_at: now - 61 * 60 * 1000 }, { now, staleMs: 300000 });
+    assert.strictEqual(orphan.terminated, true, `pid-less ${status} is removed after an hour`);
+    if (status !== STATUS.DONE) assert.notStrictEqual(orphan.status, STATUS.DONE, 'never relabelled Done');
+    const recent = normalizeSession({ session_id: 's4b', status, updated_at: now - 59 * 60 * 1000 }, { now, staleMs: 300000 });
+    assert.strictEqual(recent.terminated, false, `pid-less ${status} is kept within the hour`);
+  }
+  const waitingWithPid = normalizeSession({ session_id: 's4c', status: STATUS.YOUR_TURN, pid: 4242, updated_at: now - 6 * 60 * 60 * 1000 },
+    { now, staleMs: 300000, isPidAlive: () => true });
+  assert.strictEqual(waitingWithPid.terminated, false, 'a Your Turn whose process is alive is kept');
+
   // 6. Done is not invalidated by staleness
   const oldDone = normalizeSession({
     session_id: 's5',

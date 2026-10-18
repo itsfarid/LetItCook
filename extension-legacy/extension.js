@@ -418,8 +418,13 @@ class LetItCookButton extends PanelMenu.Button {
                             }
                         }
 
+                        // No process to watch: removed one hour after the last update (never relabelled).
+                        if (!terminated && !hasPid && now - updatedAt > DEAD_SESSION_RETENTION_MS) {
+                            terminated = true;
+                        }
+
                         // Only Cooking goes stale; an unanswered Your Turn stays Your Turn.
-                        if (status === STATUS.COOKING) {
+                        if (!terminated && status === STATUS.COOKING) {
                             if (now - updatedAt > STALE_TIMEOUT_MS) {
                                 stale = true;
                                 status = STATUS.UNKNOWN;

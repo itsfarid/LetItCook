@@ -429,9 +429,10 @@ function testExtensionLifecycleParityWithNode() {
   const ages = [10 * 1000, 10 * 60 * 1000, 2 * 60 * 60 * 1000];
   for (const target of EXTENSION_TARGETS) {
     for (const status of Object.values(STATUS)) {
-      for (const pidAlive of [true, false]) {
+      for (const pidAlive of [true, false, 'none']) {
         for (const age of ages) {
-          const raw = { session_id: 'ses_x', agent: 'opencode', status, pid: 4242, updated_at: now - age };
+          const raw = { session_id: 'ses_x', agent: 'opencode', status, updated_at: now - age };
+          if (pidAlive !== 'none') raw.pid = 4242;
           const ext = runExtensionReadSession(target, raw, pidAlive);
           const ref = normalizeSession(raw, { now, isPidAlive: () => pidAlive });
           const label = `${target}: ${status} pidAlive=${pidAlive} age=${age}`;

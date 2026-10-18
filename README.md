@@ -191,7 +191,7 @@ The indicator shows which agent most needs your attention:
 - `Unknown` is **not automatically** treated as `Done`. If we cannot reliably determine the state, we postpone the decision.
 - `Done` requires explicit session/task-complete events. Idle sessions without prior completion candidates are reported as `Unknown`.
 - Any agent disappearance (dead PID, missing state) reveals `Unknown`, never an assumed `Done`. A session whose process has exited is shown as `Unknown` for up to one hour after its last update, then removed from the panel. A session that reached `Done` or `Burn` is removed as soon as its process exits.
-- A `Cooking` session with no new state for 5 minutes is shown as `Unknown` (stale). A `Your Turn` session does not time out: a permission prompt or question stays `Your Turn` until it is answered, the session ends, or its process exits (then `Unknown`).
+- A `Cooking` session with no new state for 5 minutes is shown as `Unknown` (stale). A `Your Turn` session does not time out: a permission prompt or question stays `Your Turn` until it is answered, the session ends, or its process exits (then `Unknown`). A session with no process to watch (Copilot, or a hook that could not determine its agent's process) is removed one hour after its last update, whatever its state.
 - Multiple simultaneous sessions: the most urgent/active session determines the panel indicator.
 
 ### Known limitations
