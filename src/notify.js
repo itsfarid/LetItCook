@@ -51,7 +51,7 @@ export function runNotify(options = {}) {
   });
   const notifyDone = tracker.notifyDone;
 
-  const sessions = readAllSessionsFromDir(sessionDir);
+  const sessions = readAllSessionsFromDir(sessionDir, { prune: false });
   const events = tracker.processSessions(sessions);
 
   return {

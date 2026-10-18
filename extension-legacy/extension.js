@@ -50,21 +50,92 @@ function shortCwd(cwd) {
 
 // Notification text is built from agent-provided reasons (error messages, commands, model
 // output). Keep one short line: no stack traces, control characters or credentials.
-// Identical to cleanNotificationText/notificationReason in src/core/notification.js.
+// The GNOME extension evaluates this on the Shell's main thread, so no pattern ever sees
+// more than the bounded first line (NOTIFY_INPUT_MAX characters), and secret redaction
+// works word by word in linear time.
+// Identical to the helpers in src/core/notification.js.
 const NOTIFY_SUBJECT_MAX = 80;
 const NOTIFY_REASON_MAX = 80;
-const SECRET_WORD = '(?:api[_-]?key|token|secret|password|passwd|credential|authorization|cookie)';
-const SECRET_ASSIGNMENT_RE = new RegExp(`([\\w-]*${SECRET_WORD}[\\w-]*)\\s*[:=]\\s*("[^"]*"|'[^']*'|[^\\s,;]+)`, 'gi');
-const SECRET_FLAG_RE = new RegExp(`(--?[\\w-]*${SECRET_WORD}[\\w-]*)\\s+("[^"]*"|'[^']*'|[^\\s,;]+)`, 'gi');
+const NOTIFY_INPUT_MAX = 512;
+const SECRET_KEY_RE = /api[_-]?key|token|secret|password|passwd|credential|authorization|cookie/i;
+
+// First line of untrusted text, at most NOTIFY_INPUT_MAX + 1 characters.
+function notificationFirstLine(value) {
+    const head = value.slice(0, NOTIFY_INPUT_MAX + 1);
+    const end = head.search(/[\r\n]/);
+    return end === -1 ? head : head.slice(0, end);
+}
+
+// A line over NOTIFY_INPUT_MAX is cut at the last whitespace before the limit, so a
+// partly cut word (possibly part of a secret) is dropped entirely, and the cut is marked.
+function boundNotificationText(text) {
+    if (text.length <= NOTIFY_INPUT_MAX) return text;
+    let cut = NOTIFY_INPUT_MAX - 2;
+    while (cut > 0 && !/\s/.test(text[cut])) cut--;
+    return `${text.slice(0, cut).trimEnd()} …`.trimStart();
+}
+
+function openQuote(value) {
+    const quote = value[0];
+    return (quote === '"' || quote === "'") && value.indexOf(quote, 1) === -1 ? quote : '';
+}
+
+// Redact the value after a sensitive key: `key=value`, `prefix:key=value`, `key: value`,
+// `key = value`, `--key value`, and after `Bearer`. Each word is scanned once.
+function redactNotificationSecrets(text) {
+    const words = text.split(/(\s+)/); // words at even indexes, whitespace in between
+    let redactNext = false;
+    let quote = '';
+    for (let i = 0; i < words.length; i += 2) {
+        const word = words[i];
+        if (!word) continue;
+        if (word === '…') { // truncation marker, never a value
+            redactNext = false;
+            continue;
+        }
+        if (quote) { // rest of a quoted secret value
+            words[i] = '';
+            if (word.includes(quote)) quote = '';
+            continue;
+        }
+        if (redactNext) {
+            if (word === '=' || word === ':') continue;
+            words[i] = '[redacted]';
+            redactNext = /^bearer$/i.test(word);
+            quote = openQuote(word);
+            continue;
+        }
+        let start = 0;
+        let separator = -1;
+        for (let j = 0; j < word.length && separator === -1; j++) {
+            if (word[j] !== ':' && word[j] !== '=') continue;
+            if (SECRET_KEY_RE.test(word.slice(start, j))) separator = j;
+            start = j + 1;
+        }
+        if (separator !== -1) {
+            const value = word.slice(separator + 1);
+            if (value) {
+                words[i] = `${word.slice(0, separator + 1)}[redacted]`;
+                quote = openQuote(value);
+            } else {
+                redactNext = true;
+            }
+        } else if (/^bearer$/i.test(word) ||
+                              (SECRET_KEY_RE.test(word) && (word[0] === '-' || words[i + 2] === '=' || words[i + 2] === ':'))) {
+            redactNext = true;
+        }
+    }
+    return words.join('');
+}
 
 function cleanNotificationText(value, maxLen) {
     if (typeof value !== 'string') return '';
-    let text = value.replace(/\u001b\[[0-9;?]*[ -\/]*[@-~]/g, ''); // ANSI escape sequences
-    text = text.split(/[\r\n]/)[0]; // first line only: drops stack traces and output dumps
+    let text = boundNotificationText(notificationFirstLine(value)); // drops stack traces and dumps
+    text = text.replace(/\u001b\[[0-9;?]*[ -\/]*[@-~]/g, ''); // ANSI escape sequences
     text = text.replace(/[\u0000-\u001f\u007f-\u009f]/g, ' ');
-    text = text.replace(/\bbearer\s+[^\s,;]+/gi, 'Bearer [redacted]');
-    text = text.replace(SECRET_FLAG_RE, '$1 [redacted]');
-    text = text.replace(SECRET_ASSIGNMENT_RE, '$1=[redacted]');
+    // Invisible direction overrides/isolates and zero-width spaces (ZWNJ/ZWJ kept for scripts and emoji)
+    text = text.replace(/[\u061c\u200b\u200e\u200f\u202a-\u202e\u2060\u2066-\u2069\ufeff]/g, '');
+    text = redactNotificationSecrets(text);
     text = text.replace(/[A-Za-z0-9+/_=-]{32,}/g, '[redacted]'); // long tokens and keys
     text = text.replace(/\s+/g, ' ').trim();
     return text.length > maxLen ? `${text.slice(0, maxLen - 1)}…` : text;
@@ -76,8 +147,9 @@ function cleanNotificationText(value, maxLen) {
 // absolute paths to their last component.
 function notificationReason(status, reason) {
     if (typeof reason !== 'string') return '';
-    let text = reason;
-    if (status === STATUS.YOUR_TURN) text = text.split(/[\r\n]/)[0].split(':').slice(0, 2).join(':');
+    let text = notificationFirstLine(reason);
+    if (status === STATUS.YOUR_TURN) text = text.split(':').slice(0, 2).join(':');
+    text = boundNotificationText(text);
     text = text.replace(/\b([a-z][a-z0-9+.-]*):\/\/(?:[^\s/@]*@)?([^\s/?#'"]+)[^\s'"]*/gi, '$1://$2');
     text = text.replace(/(?:~|\.{1,2})?\/(?:[^\s/'"`,;:()]+\/)+([^\s/'"`,;:()]*)/g, '…/$1');
     return cleanNotificationText(text, NOTIFY_REASON_MAX);
@@ -96,32 +168,64 @@ function formatNotificationBody(s) {
     return subject ? `${detail} • ${subject}` : detail;
 }
 
+// Text of one dropdown row. Agent-provided fields are cleaned like notification text, so
+// the menu never shows stack traces, command arguments of Your Turn requests or secrets.
+function formatSessionRow(s, meta, elapsed) {
+    const agent = cleanNotificationText(s.agent, 32) || 'agent';
+    const subject = cleanNotificationText(s.title || shortCwd(s.cwd), NOTIFY_SUBJECT_MAX);
+    const reason = notificationReason(s.status, s.reason);
+    return {
+        title: `${meta.emoji} [${agent}] ${subject}`,
+        subtitle: `${meta.label}${reason ? ': ' + reason : ''} • ${elapsed}${s.cwd ? ' • ' + shortCwd(s.cwd) : ''}`,
+    };
+}
+
 // Restrict a LetItCook-owned directory to owner-only (0700), querying and
 // setting attributes with NOFOLLOW_SYMLINKS so a link is never chmod-ed by path.
+// Returns false unless `path` is a directory owned by the current user, or a symlink owned
+// by the current user to a directory the current user owns that is already private (no
+// group/other access; a link target is never chmod-ed). Same rules as ensurePrivateDir in
+// src/core/fs-safe.js. The caller never reads or deletes session files otherwise.
 function ensurePrivateDir(path) {
     try {
         const dirFile = Gio.File.new_for_path(path);
         const flags = Gio.FileQueryInfoFlags.NOFOLLOW_SYMLINKS;
         const attrs = 'standard::type,unix::mode,owner::user';
         const info = dirFile.query_info(attrs, flags, null);
+        const user = GLib.get_user_name();
+        if (info.get_file_type() === Gio.FileType.SYMBOLIC_LINK) {
+            const target = dirFile.query_info(attrs, Gio.FileQueryInfoFlags.NONE, null); // throws if broken
+            const trusted = info.has_attribute('owner::user') &&
+                info.get_attribute_string('owner::user') === user &&
+                target.get_file_type() === Gio.FileType.DIRECTORY &&
+                target.has_attribute('owner::user') &&
+                target.get_attribute_string('owner::user') === user &&
+                target.has_attribute('unix::mode') &&
+                (target.get_attribute_uint32('unix::mode') & 0o077) === 0;
+            if (!trusted)
+                log(`[LetItCook] ${path} must link to a directory you own that others cannot access (chmod 700)`);
+            return trusted;
+        }
         if (info.get_file_type() !== Gio.FileType.DIRECTORY ||
             !info.has_attribute('unix::mode') ||
             !info.has_attribute('owner::user') ||
-            info.get_attribute_string('owner::user') !== GLib.get_user_name())
-            return;
+            info.get_attribute_string('owner::user') !== user)
+            return false;
         if ((info.get_attribute_uint32('unix::mode') & 0o777) === 0o700)
-            return;
+            return true;
         if (!dirFile.set_attribute_uint32('unix::mode', 0o700, flags, null)) {
             log(`[LetItCook] Could not restrict permissions on ${path}`);
-            return;
+            return true;
         }
         const secured = dirFile.query_info(attrs, flags, null);
         if (secured.get_file_type() !== Gio.FileType.DIRECTORY ||
             secured.get_attribute_string('owner::user') !== GLib.get_user_name() ||
             (secured.get_attribute_uint32('unix::mode') & 0o777) !== 0o700)
             log(`[LetItCook] Could not verify private permissions on ${path}`);
+        return true;
     } catch (e) {
         log(`[LetItCook] Could not restrict permissions on ${path}: ${e}`);
+        return false;
     }
 }
 
@@ -175,8 +279,11 @@ class LetItCookButton extends PanelMenu.Button {
         GLib.mkdir_with_parents(this._stateDir, 0o700);
         // Correct pre-existing directories created with broader permissions.
         // Only LetItCook's own two directories are touched, never their parents.
-        ensurePrivateDir(GLib.path_get_dirname(this._stateDir));
-        ensurePrivateDir(this._stateDir);
+        const parentTrusted = ensurePrivateDir(GLib.path_get_dirname(this._stateDir));
+        const dirTrusted = ensurePrivateDir(this._stateDir);
+        this._stateDirTrusted = parentTrusted && dirTrusted;
+        if (!this._stateDirTrusted)
+            log(`[LetItCook] Not reading ${this._stateDir}: it is not a directory owned by you`);
 
         this._container = new St.BoxLayout({
             style_class: 'letitcook-panel-box',
@@ -255,17 +362,20 @@ class LetItCookButton extends PanelMenu.Button {
 
     _readSessions() {
         const sessions = [];
+        if (this._stateDirTrusted === false)
+            return sessions;
         const dirFile = Gio.File.new_for_path(this._stateDir);
 
         let enumerator = null;
         try {
-            enumerator = dirFile.enumerate_children('standard::name', Gio.FileQueryInfoFlags.NONE, null);
+            // Only regular files are session files (writers create them by rename); symlinks are skipped.
+            enumerator = dirFile.enumerate_children('standard::name,standard::type', Gio.FileQueryInfoFlags.NOFOLLOW_SYMLINKS, null);
             let info;
             const now = Date.now();
 
             while ((info = enumerator.next_file(null)) !== null) {
                 const name = info.get_name();
-                if (!name.endsWith('.json') || name.startsWith('.')) continue;
+                if (!name.endsWith('.json') || name.startsWith('.') || info.get_file_type() !== Gio.FileType.REGULAR) continue;
 
                 const filePath = GLib.build_filenamev([this._stateDir, name]);
                 const file = Gio.File.new_for_path(filePath);
@@ -506,14 +616,24 @@ class LetItCookButton extends PanelMenu.Button {
                     const title = `LetItCook: ${cleanNotificationText(s.agent || 'Agent', 32) || 'Agent'}`;
                     const body = formatNotificationBody(s);
 
+                    let delivered = false;
                     try {
                         Main.notify(title, body);
-                    } catch (e) {}
+                        delivered = true;
+                    } catch (e) {
+                        log(`[LetItCook] Could not show notification: ${e}`);
+                    }
 
-                    this._notifyCache.sessions[sid] = {
+                    // A failed popup is not recorded as notified. lastStatus still advances,
+                    // so a broken notification is not retried on every scan.
+                    this._notifyCache.sessions[sid] = delivered ? {
                         lastStatus: s.status,
                         notifiedStatus: s.status,
                         notifiedAt: Date.now(),
+                    } : {
+                        lastStatus: s.status,
+                        notifiedStatus: cached ? cached.notifiedStatus : null,
+                        notifiedAt: cached ? cached.notifiedAt : null,
                     };
                 }
             } else {
@@ -578,16 +698,14 @@ class LetItCookButton extends PanelMenu.Button {
             });
 
             const sMeta = STATUS_META[s.status] || STATUS_META[STATUS.UNKNOWN];
-            const titleText = `${sMeta.emoji} [${s.agent}] ${s.title || shortCwd(s.cwd)}`;
+            const row = formatSessionRow(s, sMeta, formatElapsed(now - s.updated_at));
             const titleLabel = new St.Label({
-                text: titleText,
+                text: row.title,
                 style_class: 'letitcook-session-title',
             });
 
-            const elapsed = formatElapsed(now - s.updated_at);
-            const subText = `${sMeta.label}${s.reason ? ': ' + s.reason : ''} • ${elapsed}${s.cwd ? ' • ' + shortCwd(s.cwd) : ''}`;
             const subLabel = new St.Label({
-                text: subText,
+                text: row.subtitle,
                 style_class: 'letitcook-session-subtitle',
             });
 
