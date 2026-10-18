@@ -170,7 +170,7 @@ export const claudeSpec = {
   malformed: [{ hook_event_name: 'PreToolUse' }, { hook_event_name: 'Stop', session_id: '../x' }, { hook_event_name: ['Stop'], session_id: 's1' }],
   createAdapter: () => new ClaudeAdapter(),
   binEnv: ['CLAUDE_BIN'],
-  sourceFiles: ['src/adapters/claude/hooks.js', 'src/adapters/hook-adapter.js', 'src/core/lifecycle.js'],
+  sourceFiles: ['src/adapters/claude/hooks.js', 'src/adapters/hook-adapter.js', 'src/adapters/hook-input.js', 'src/core/lifecycle.js'],
 };
 
 export const SPECS = [openCodeSpec, copilotSpec, claudeSpec];
