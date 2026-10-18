@@ -73,7 +73,7 @@ The hook command is a pure observer. It prints nothing to stdout or stderr and a
 
 | Hook event | Signal |
 |---|---|
-| `UserPromptSubmit` | `turn_start` (its optional `session_title` is the title; the prompt is never read) |
+| `UserPromptSubmit` | `turn_start` (neither the prompt nor the prompt-derived `session_title` is stored) |
 | `PreToolUse` | `activity`, with `revive` for the main agent. `AskUserQuestion` also opens a `question` request |
 | `PostToolUse`, `PostToolUseFailure`, `PermissionDenied` | Resolve the call's permission or question, then `activity`. `PostToolUseFailure` with `is_interrupt` is a `cancel` |
 | `PermissionRequest` | `request_open` (`permission:<tool>`) |

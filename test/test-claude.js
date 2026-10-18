@@ -127,7 +127,8 @@ function testActivityAndIdentity() {
     assert.strictEqual(state.status, STATUS.COOKING);
     assert.strictEqual(state.reason, 'tool:Bash');
     assert.strictEqual(state.cwd, '/work/project');
-    assert.strictEqual(state.title, 'Fix the login bug');
+    assert.strictEqual(state.title, '', 'the prompt-derived session title is not stored');
+    assert.ok(!fs.readFileSync(path.join(dir, 'claude_sess-a.json'), 'utf8').includes('login bug'));
     assert.strictEqual(state.pid, 4242);
     replay([claudeEvent('PostToolUse', 'sess-a', { tool_name: 'Bash', tool_use_id: 'toolu_1', tool_response: { stdout: secret } })], dir);
     state = adapter.getSessionState('sess-a', { baseDir: dir });
