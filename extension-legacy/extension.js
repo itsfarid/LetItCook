@@ -590,14 +590,24 @@ class LetItCookButton extends PanelMenu.Button {
                     const title = `LetItCook: ${cleanNotificationText(s.agent || 'Agent', 32) || 'Agent'}`;
                     const body = formatNotificationBody(s);
 
+                    let delivered = false;
                     try {
                         Main.notify(title, body);
-                    } catch (e) {}
+                        delivered = true;
+                    } catch (e) {
+                        log(`[LetItCook] Could not show notification: ${e}`);
+                    }
 
-                    this._notifyCache.sessions[sid] = {
+                    // A failed popup is not recorded as notified. lastStatus still advances,
+                    // so a broken notification is not retried on every scan.
+                    this._notifyCache.sessions[sid] = delivered ? {
                         lastStatus: s.status,
                         notifiedStatus: s.status,
                         notifiedAt: Date.now(),
+                    } : {
+                        lastStatus: s.status,
+                        notifiedStatus: cached ? cached.notifiedStatus : null,
+                        notifiedAt: cached ? cached.notifiedAt : null,
                     };
                 }
             } else {
