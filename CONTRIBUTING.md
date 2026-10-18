@@ -73,7 +73,7 @@ LetItCook/
 ### 1. Understand the problem before implementing
 
 - Read [AGENTS.md §27](AGENTS.md#27-immediate-instructions-for-coding-agents) for guiding principles (personal-first, not prematurely optimized).
-- If adding support for an agent, review `src/adapters/opencode/plugin.js` (Uplink event hook example) and `src/adapters/copilot/adapter.js` (session-state replay example).
+- If adding support for an agent, review `src/adapters/opencode/plugin.js` (event-hook example) and `src/adapters/copilot/adapter.js` (session-state replay example).
 - Identify the most reliable lifecycle mechanism reported by the agent documentation before falling back to terminal parsing.
 
 ### 2. Make small, focused changes
@@ -84,7 +84,7 @@ LetItCook/
 
 ### 3. Write tests before or alongside code
 
-- Every change must have at least one passing test (unit or integration) unless transformationally trivial.
+- Every change must have at least one passing test (unit or integration) unless the change is trivial (for example a typo).
 - New adapter functionality: include basic contract tests (`detectSessions`, `getSessionState`, `normalizeState`, `syncToStateDir`).
 - New UI behavior (status transitions, notifications): add or update `test-notification*.js` assertions.
 
@@ -179,9 +179,9 @@ Then restart GNOME Shell so it loads the new code. On X11, press Alt + F2, type 
 
 3. **Log only structural data** (status, reason, durations). Never log prompts, credentials, or full conversation JSON. For precision, use structured fields rather than `console.log`.
 
-4. **Notification deduplication is trust boundaries**:
+4. **Notification deduplication crosses a trust boundary**:
    - Cache creation: strict permissions checks (0600, nlink=1).
-   - JNI: do not simulate emission or dispatch from Node.js; rely solely on GNOME extension.
+   - Do not emit or dispatch notifications from Node.js; only the GNOME extension shows them.
 
 5. **Graceful degradation**:
    - Errors in one adapter should not abort the whole GNOME UI.
@@ -204,7 +204,7 @@ Provide:
   - Copilot: `ls ~/.copilot/session-state/` (if applicable)
 - **Environment**:
   - Distribution + Window System: e.g., Ubuntu 24.04, X11
-  - Replacement scripts: `~/.local/state/letitcook/notify_cache.json` permissions
+  - Notification cache permissions: `ls -l ~/.local/state/letitcook/notify_cache.json`
 - **Logs**: direct `node src/notify.js --include-done` output and any error logs from the extension.
 
 ### Development-specific bug reports
@@ -220,7 +220,7 @@ For UI/notification issues:
 
 For security/persistence concerns:
 
-- Attach exact sequences of `fs*Sync` calls being bypassed (aka not using `fs-safe.js` or GNOME hardening calls) and root cause.
+- Attach exact sequences of `fs*Sync` calls being bypassed (code paths that do not use `fs-safe.js` or the extension's hardening helpers) and root cause.
 
 ## Pull request checklist
 
