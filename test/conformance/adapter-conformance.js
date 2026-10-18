@@ -10,6 +10,8 @@
 //     expect: { cancel },        documented status after a user cancel
 //     notes: { scenario: why },  documented reason an assertion does not apply
 //                                (unrelatedActivity, lateToolEvent)
+//     capabilities: [...],       outcomes the adapter declares (CAPABILITY); checked
+//                                against the fixtures
 //     createAdapter(),           registry adapter (isAvailable / detectSessions)
 //     sourceFiles: [...],        adapter sources, checked for network/process use
 //     replayThroughFiles(sid, events) -> statuses after each event, via the state file
@@ -87,6 +89,16 @@ export function runConformance(spec) {
 
   for (const name of Object.keys(spec.fixtures)) {
     assert.ok(FIXTURE_NAMES.includes(name), label(`unknown fixture ${name}`));
+  }
+
+  // Declared capabilities match the events the adapter really has: an outcome is declared
+  // exactly when there is a fixture for it, so missing support is never claimed.
+  if (spec.capabilities) {
+    const present = name => typeof spec.fixtures[name] === 'function' && spec.fixtures[name]('probe', 1) !== null;
+    const expected = { requests: present('permissionAsk') || present('questionAsk'), complete: present('turnComplete'), fail: present('failure'), cancel: present('cancel') };
+    for (const [capability, has] of Object.entries(expected)) {
+      assert.strictEqual(spec.capabilities.includes(capability), has, label(`capability ${capability} declared ${!has}, but there is ${has ? 'an' : 'no'} event for it`));
+    }
   }
 
   // Malformed, empty and unknown events never throw and never invent a state.
