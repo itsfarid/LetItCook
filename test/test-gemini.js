@@ -70,6 +70,40 @@ function testActivity() {
   });
 }
 
+function testConfirmationsAndTurnEnd() {
+  withState((dir, state) => {
+    const shell = { tool_name: 'run_shell_command', tool_input: { command: 'npm test' } };
+    replay([
+      geminiEvent('BeforeAgent', 'g-p'),
+      geminiEvent('BeforeTool', 'g-p', shell),
+      geminiEvent('Notification', 'g-p', { notification_type: 'ToolPermission', message: 'Tool requires execution', details: { type: 'exec', title: 'x', command: 'npm test' } }),
+    ], dir);
+    assert.strictEqual(state('g-p').status, STATUS.YOUR_TURN);
+    assert.strictEqual(state('g-p').reason, 'permission:exec', 'names the kind of confirmation, never the command');
+    replay([geminiEvent('BeforeTool', 'g-p', { tool_name: 'read_file', tool_input: { path: '/x' } })], dir);
+    assert.strictEqual(state('g-p').status, STATUS.YOUR_TURN, 'BeforeTool (runs before confirmation) does not resolve it');
+    replay([geminiEvent('AfterTool', 'g-p', { ...shell, tool_response: { llmContent: 'ok' } })], dir);
+    assert.strictEqual(state('g-p').status, STATUS.COOKING, 'a tool finishing means the confirmation was answered');
+
+    replay([geminiEvent('Notification', 'g-p', { notification_type: 'ToolPermission', details: { type: 'ask_user', title: 'Q' } })], dir);
+    assert.strictEqual(state('g-p').reason, 'question', 'ask_user is a question');
+    replay([geminiEvent('Notification', 'g-p', { notification_type: 'SomethingElse' })], dir);
+    assert.strictEqual(state('g-p').status, STATUS.YOUR_TURN);
+
+    replay([geminiEvent('AfterAgent', 'g-p', { prompt: 'x', prompt_response: 'y', stop_hook_active: false })], dir);
+    assert.strictEqual(state('g-p').status, STATUS.YOUR_TURN, 'AfterAgent hands the turn back');
+    assert.strictEqual(state('g-p').reason, 'turn ended');
+    for (const response of ['done!', '[no response text]', '']) {
+      replay([geminiEvent('BeforeAgent', 'g-o'), geminiEvent('AfterAgent', 'g-o', { prompt_response: response })], dir);
+      const st = state('g-o').status;
+      assert.ok(st !== STATUS.DONE && st !== STATUS.BURN, 'AfterAgent never claims Done or Burn, whatever the response text');
+    }
+
+    replay([geminiEvent('BeforeAgent', 'g-x'), geminiEvent('SessionEnd', 'g-x', { reason: 'exit' })], dir);
+    assert.ok(!fs.existsSync(path.join(dir, 'gemini_g-x.json')), 'SessionEnd removes the session');
+  });
+}
+
 function testHookCommandAndConfig() {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'letitcook-gemini-home-'));
   try {
@@ -99,6 +133,7 @@ function testHookCommandAndConfig() {
 function run() {
   testDetectionAndRegistration();
   testActivity();
+  testConfirmationsAndTurnEnd();
   testHookCommandAndConfig();
   console.log('All LetItCook Gemini CLI adapter tests passed.');
 }

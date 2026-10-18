@@ -221,6 +221,23 @@ export const geminiSpec = {
     promptSubmit: sid => geminiEvent('BeforeAgent', sid, { prompt: SECRET }),
     toolStart: (sid, n) => geminiEvent('BeforeTool', sid, { tool_name: 'run_shell_command', tool_input: { command: `${SECRET} ${n}` } }),
     toolEnd: (sid, n) => geminiEvent('AfterTool', sid, { tool_name: 'run_shell_command', tool_input: { command: `${SECRET} ${n}` }, tool_response: { llmContent: SECRET } }),
+    permissionAsk: sid => geminiEvent('Notification', sid, { notification_type: 'ToolPermission', message: SECRET, details: { type: 'exec', title: SECRET, command: SECRET } }),
+    permissionResolve: sid => geminiEvent('AfterTool', sid, { tool_name: 'run_shell_command', tool_input: { command: SECRET }, tool_response: { llmContent: SECRET } }),
+    questionAsk: sid => geminiEvent('Notification', sid, { notification_type: 'ToolPermission', message: SECRET, details: { type: 'ask_user', title: SECRET } }),
+    questionResolve: sid => geminiEvent('AfterTool', sid, { tool_name: 'ask_user', tool_input: { question: SECRET }, tool_response: { llmContent: SECRET } }),
+    // AfterAgent fires after success, failure and cancellation alike (no outcome field).
+    turnComplete: () => null,
+    turnEndUnknown: sid => geminiEvent('AfterAgent', sid, { prompt: SECRET, prompt_response: SECRET, stop_hook_active: false }),
+    failure: () => null,
+    cancel: () => null,
+    sessionEnd: sid => geminiEvent('SessionEnd', sid, { reason: 'exit' }),
+    // Subagents run as the invoke_agent tool and carry no agent id.
+    subagentActivity: () => null,
+    subagentComplete: () => null,
+    subagentFailure: () => null,
+  },
+  notes: {
+    unrelatedActivity: 'Gemini executes no tool of a batch while one of its calls awaits confirmation, so a tool finishing is the resolution',
   },
   malformed: [{ hook_event_name: 'BeforeTool' }, { hook_event_name: 'BeforeAgent', session_id: '../x' }, { hook_event_name: null, session_id: 's1' }],
   createAdapter: () => new GeminiAdapter(),
