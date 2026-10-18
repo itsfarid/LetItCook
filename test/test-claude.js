@@ -8,6 +8,7 @@ import { createDefaultRegistry } from '../src/core/registry.js';
 import { applySignals } from '../src/hooks/bridge.js';
 import { SIGNAL } from '../src/core/lifecycle.js';
 import { STATUS } from '../src/core/status.js';
+import { shellQuote, hookCommand } from '../src/hooks/config.js';
 
 const HOOK = path.resolve('src/hooks/hook.js');
 
@@ -289,6 +290,44 @@ function testSubagents() {
   }
 }
 
+function testPrintedConfig() {
+  const result = spawnSync(process.execPath, [HOOK, '--print-config', 'claude'], { encoding: 'utf8' });
+  assert.strictEqual(result.status, 0);
+  const config = JSON.parse(result.stdout);
+  assert.deepStrictEqual(Object.keys(config.hooks), claudeHooks.events, 'one entry per registered event');
+  for (const [event, groups] of Object.entries(config.hooks)) {
+    assert.strictEqual(groups.length, 1);
+    const [hook] = groups[0].hooks;
+    assert.strictEqual(hook.type, 'command', event);
+    assert.ok(hook.timeout > 0 && hook.timeout <= 30, 'short timeout');
+    assert.ok(!('async' in hook), 'synchronous, so events keep their order');
+  }
+  assert.strictEqual(spawnSync(process.execPath, [HOOK, '--print-config', 'nope'], { encoding: 'utf8' }).status, 2);
+
+  // The printed command works when run through a shell, as Claude Code runs it.
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'letitcook-claude-shell-'));
+  try {
+    const command = config.hooks.UserPromptSubmit[0].hooks[0].command;
+    const run = spawnSync('sh', ['-c', command], {
+      input: JSON.stringify(claudeEvent('UserPromptSubmit', 'via-shell')),
+      env: { PATH: '/usr/bin:/bin', HOME: home, XDG_STATE_HOME: home },
+      encoding: 'utf8',
+    });
+    assert.strictEqual(run.status, 0);
+    assert.strictEqual(run.stdout + run.stderr, '');
+    const state = JSON.parse(fs.readFileSync(path.join(home, 'letitcook', 'sessions', 'claude_via-shell.json'), 'utf8'));
+    assert.strictEqual(state.status, STATUS.COOKING, 'works without node on PATH (absolute paths)');
+  } finally {
+    fs.rmSync(home, { recursive: true, force: true });
+  }
+
+  for (const value of ["/opt/my tools/node", "/it's/here", '$(touch /tmp/pwned)', 'a"b`c']) {
+    const echoed = spawnSync('sh', ['-c', `printf %s ${shellQuote(value)}`], { encoding: 'utf8' }).stdout;
+    assert.strictEqual(echoed, value, `quoting survives ${value}`);
+  }
+  assert.strictEqual(hookCommand('claude', { node: '/n', script: '/s/hook.js' }), "'/n' '/s/hook.js' 'claude'");
+}
+
 function testHookCommandEndToEnd() {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'letitcook-claude-e2e-'));
   try {
@@ -313,6 +352,7 @@ function run() {
   testPermissionsAndQuestions();
   testTurnEndings();
   testSubagents();
+  testPrintedConfig();
   testHookCommandEndToEnd();
   console.log('All LetItCook Claude Code adapter tests passed.');
 }

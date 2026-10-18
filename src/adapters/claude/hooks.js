@@ -49,6 +49,17 @@ export const claudeHooks = {
     'Stop', 'StopFailure', 'SessionEnd', 'SubagentStart', 'SubagentStop',
   ],
 
+  // Settings block for ~/.claude/settings.json (or a project's .claude/settings.json):
+  // one synchronous command hook per event, so events keep their order. None of these
+  // events needs a matcher.
+  config(command) {
+    const hooks = {};
+    for (const event of this.events) {
+      hooks[event] = [{ hooks: [{ type: 'command', command, timeout: 10 }] }];
+    }
+    return { hooks };
+  },
+
   toSignals(input) {
     if (!input || typeof input !== 'object') return [];
     const event = input.hook_event_name;
