@@ -124,6 +124,34 @@ function testEndToEndThroughReducer() {
   assert.strictEqual(apply('session.ended'), 'removed');
 }
 
+// Event ids of events that change nothing are not written to the state file. Re-applying
+// such an event later (a duplicate) must still change nothing, whatever happened between.
+function testUnpersistedDuplicatesStayHarmless() {
+  const apply = (state, type, extra) => {
+    for (const s of eventToSignals(check(protocolEvent(type, extra)).event)) {
+      const next = reduceSession(state, s, { agent: 'mycli', now: NOW });
+      if (next) state = next;
+    }
+    return state;
+  };
+  const activity = protocolEvent('activity', { event_id: 'dup-activity' });
+  const dupApply = state => {
+    let out = state;
+    for (const s of eventToSignals(check(activity).event)) {
+      const next = reduceSession(out, s, { agent: 'mycli', now: NOW });
+      if (next) out = next;
+    }
+    return out;
+  };
+  let state = apply(null, 'turn.started', { turn_id: 't1' });
+  state = dupApply(state);
+  // The duplicate arrives after the session settled, or while a request waits.
+  const done = apply(state, 'turn.completed', { turn_id: 't1' });
+  assert.strictEqual(dupApply({ ...done, lifecycle: { ...done.lifecycle, seen: [] } }).status, STATUS.DONE);
+  const waiting = apply(state, 'request.opened', { turn_id: 't1', request_id: 'r1' });
+  assert.strictEqual(dupApply({ ...waiting, lifecycle: { ...waiting.lifecycle, seen: [] } }).status, STATUS.YOUR_TURN);
+}
+
 function run() {
   testValidEnvelope();
   testRejectedEnvelopes();
@@ -131,6 +159,7 @@ function run() {
   testUnknownTypesAreIgnored();
   testMapping();
   testEndToEndThroughReducer();
+  testUnpersistedDuplicatesStayHarmless();
   console.log('All LetItCook event protocol tests passed.');
 }
 

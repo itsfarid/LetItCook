@@ -11,7 +11,9 @@
 //
 // Every method validates the event and applies it through the shared bridge (same rules,
 // lock and file safety as the command). It never throws into the host CLI; it returns
-// `{ ok, error? }` for diagnostics (error codes only, never event values).
+// `{ ok, error? }` for diagnostics (error codes only, never event values). Calls are
+// synchronous: a few milliseconds, up to 2 s when another writer holds the session's lock
+// (the event is then skipped, like with the command transport).
 
 import { randomUUID } from 'node:crypto';
 import { applySignals } from '../hooks/bridge.js';
