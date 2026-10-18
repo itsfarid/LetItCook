@@ -12,6 +12,7 @@ import { reduceSession } from '../src/core/lifecycle.js';
 import { applySignals, readStateFile, stateFileName } from '../src/hooks/bridge.js';
 import { claudeHooks, ClaudeAdapter } from '../src/adapters/claude/hooks.js';
 import { codexHooks, CodexAdapter } from '../src/adapters/codex/hooks.js';
+import { geminiHooks, GeminiAdapter } from '../src/adapters/gemini/hooks.js';
 
 // Applies a fixture that may be a single event or a sequence of events.
 function sequenced(stepOne) {
@@ -208,7 +209,26 @@ export const codexSpec = {
   sourceFiles: ['src/adapters/codex/hooks.js', 'src/adapters/hook-adapter.js', 'src/adapters/hook-input.js', 'src/core/lifecycle.js'],
 };
 
-export const SPECS = [openCodeSpec, copilotSpec, claudeSpec, codexSpec];
+// --- Gemini CLI: command hooks (src/adapters/gemini/hooks.js) ---
+const geminiEvent = (event, sid, extra = {}) => ({
+  session_id: sid, transcript_path: '', cwd: '/work', hook_event_name: event, timestamp: new Date().toISOString(), ...extra,
+});
+export const geminiSpec = {
+  id: 'gemini',
+  step: hookStep(geminiHooks),
+  replayThroughFiles: hookReplayThroughFiles(geminiHooks),
+  fixtures: {
+    promptSubmit: sid => geminiEvent('BeforeAgent', sid, { prompt: SECRET }),
+    toolStart: (sid, n) => geminiEvent('BeforeTool', sid, { tool_name: 'run_shell_command', tool_input: { command: `${SECRET} ${n}` } }),
+    toolEnd: (sid, n) => geminiEvent('AfterTool', sid, { tool_name: 'run_shell_command', tool_input: { command: `${SECRET} ${n}` }, tool_response: { llmContent: SECRET } }),
+  },
+  malformed: [{ hook_event_name: 'BeforeTool' }, { hook_event_name: 'BeforeAgent', session_id: '../x' }, { hook_event_name: null, session_id: 's1' }],
+  createAdapter: () => new GeminiAdapter(),
+  binEnv: ['GEMINI_BIN'],
+  sourceFiles: ['src/adapters/gemini/hooks.js', 'src/adapters/hook-adapter.js', 'src/adapters/hook-input.js', 'src/core/lifecycle.js'],
+};
+
+export const SPECS = [openCodeSpec, copilotSpec, claudeSpec, codexSpec, geminiSpec];
 
 function run() {
   for (const spec of SPECS) {
