@@ -113,14 +113,17 @@ export function acquireLock(lockPath, { timeoutMs = LOCK_TIMEOUT_MS, staleMs = L
   }
 }
 
-// Reads this adapter's previous record without following symlinks. A file that is not a
-// regular file owned by the current user, is oversized or does not parse is ignored.
+// Reads this adapter's previous record without following symlinks. It must be what the
+// bridge writes: a private (0600-style), single-link regular file owned by the current
+// user. Anything else, an oversized file, or one that does not parse is ignored (the next
+// write replaces it with a fresh record).
 export function readStateFile(filePath, expected) {
   let fd;
   try {
     fd = fs.openSync(filePath, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
     const st = fs.fstatSync(fd);
     if (!st.isFile() || st.size > MAX_STATE_FILE_BYTES) return null;
+    if (st.nlink !== 1 || (st.mode & 0o077) !== 0) return null;
     if (typeof process.getuid === 'function' && st.uid !== process.getuid()) return null;
     const value = JSON.parse(fs.readFileSync(fd, 'utf8'));
     if (!value || value.session_id !== expected.sessionId || value.agent !== expected.agent) return null;

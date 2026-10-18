@@ -113,12 +113,19 @@ function testReadStateFileSafety() {
   try {
     fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
     const file = path.join(dir, 'claude_s1.json');
-    fs.writeFileSync(file, JSON.stringify({ session_id: 's1', agent: 'claude', status: 'cooking' }));
+    fs.writeFileSync(file, JSON.stringify({ session_id: 's1', agent: 'claude', status: 'cooking' }), { mode: 0o600 });
+    assert.strictEqual(readStateFile(file, { sessionId: 's1', agent: 'claude' }).status, 'cooking');
+    fs.chmodSync(file, 0o644);
+    assert.strictEqual(readStateFile(file, { sessionId: 's1', agent: 'claude' }), null, 'readable by others');
+    fs.chmodSync(file, 0o600);
+    fs.linkSync(file, path.join(root, 'hardlink.json'));
+    assert.strictEqual(readStateFile(file, { sessionId: 's1', agent: 'claude' }), null, 'hard-linked');
+    fs.unlinkSync(path.join(root, 'hardlink.json'));
     assert.strictEqual(readStateFile(file, { sessionId: 's1', agent: 'claude' }).status, 'cooking');
     assert.strictEqual(readStateFile(file, { sessionId: 's1', agent: 'gemini' }), null, 'other agent');
     assert.strictEqual(readStateFile(file, { sessionId: 's2', agent: 'claude' }), null, 'other session');
     const target = path.join(root, 'elsewhere.json');
-    fs.writeFileSync(target, JSON.stringify({ session_id: 's3', agent: 'claude', status: 'done' }));
+    fs.writeFileSync(target, JSON.stringify({ session_id: 's3', agent: 'claude', status: 'done' }), { mode: 0o600 });
     fs.symlinkSync(target, path.join(dir, 'claude_s3.json'));
     assert.strictEqual(readStateFile(path.join(dir, 'claude_s3.json'), { sessionId: 's3', agent: 'claude' }), null, 'symlinks are not followed');
     fs.writeFileSync(path.join(dir, 'claude_s4.json'), 'x'.repeat(300 * 1024));
