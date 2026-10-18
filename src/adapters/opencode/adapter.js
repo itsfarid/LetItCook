@@ -131,7 +131,8 @@ export function mapOpenCodeEvent(event, previousState = null) {
     case 'permission.v2.replied':
     case 'question.replied':
     case 'question.v2.replied':
-    case 'question.rejected': {
+    case 'question.rejected':
+    case 'question.v2.rejected': {
       status = STATUS.COOKING;
       reason = `${event.type}:${p.reply || p.action || 'replied'}`;
       break;
