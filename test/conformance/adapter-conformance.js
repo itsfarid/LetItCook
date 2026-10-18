@@ -12,6 +12,8 @@
 //                                (unrelatedActivity, lateToolEvent)
 //     createAdapter(),           registry adapter (isAvailable / detectSessions)
 //     sourceFiles: [...],        adapter sources, checked for network/process use
+//     replayThroughFiles(sid, events) -> statuses after each event, via the state file
+//                                (hook adapters; one process per event)
 //   }
 //
 // Fixtures are synthetic events built from each provider's documented schema. The suite
@@ -212,6 +214,28 @@ export function runConformance(spec) {
     assert.deepStrictEqual(writes, [], label('mapping events writes to the console'));
     const stored = JSON.stringify([...h.states.values()]);
     assert.ok(!stored.includes(SECRET), label('session state contains prompt, tool input or message content'));
+  }
+
+  // Hook adapters: every event is a separate process that only sees the state file, so
+  // replaying through the file must give the same states as replaying in memory.
+  if (spec.replayThroughFiles) {
+    const sequences = [
+      ['promptSubmit', 'toolStart', 'permissionAsk', ['toolStart', 2], 'permissionResolve', 'toolEnd', 'turnComplete'],
+      ['promptSubmit', 'questionAsk', 'questionResolve', 'failure'],
+      ['promptSubmit', 'subagentActivity', 'subagentComplete', 'cancel', 'promptSubmit', 'sessionEnd'],
+    ];
+    for (const names of sequences) {
+      const h = fresh();
+      const events = [];
+      const expected = names.map((entry) => {
+        const [name, n] = Array.isArray(entry) ? entry : [entry, 1];
+        const event = h.fx(name, 's1', n);
+        if (event) events.push(event);
+        return event ? statusOf(h.apply('s1', event)) : undefined;
+      }).filter(x => x !== undefined);
+      const actual = spec.replayThroughFiles('s1', events);
+      assert.deepStrictEqual(actual, expected, label(`file replay differs from memory: ${names.join(',')}`));
+    }
   }
 
   // Not installed: availability is false and nothing throws.
