@@ -8,7 +8,7 @@
 
 import { SIGNAL } from '../../core/lifecycle.js';
 import { HookAdapter } from '../hook-adapter.js';
-import { label, str, commandHooksConfig } from '../hook-input.js';
+import { label, str, toolCallRequestId, commandHooksConfig } from '../hook-input.js';
 
 export const codexHooks = {
   id: 'codex',
@@ -16,7 +16,7 @@ export const codexHooks = {
   bins: ['codex'],
   binEnv: 'CODEX_BIN',
   // Hook events LetItCook registers for.
-  events: ['UserPromptSubmit', 'PreToolUse', 'PostToolUse'],
+  events: ['UserPromptSubmit', 'PreToolUse', 'PostToolUse', 'PermissionRequest'],
 
   // Settings block for ~/.codex/hooks.json. Codex runs non-managed hooks only after the
   // user trusts them in /hooks. Timeouts are 3 s, the maximum Codex allows for SessionEnd
@@ -36,8 +36,18 @@ export const codexHooks = {
       case 'UserPromptSubmit':
         return [{ ...base, type: SIGNAL.TURN_START }];
       case 'PreToolUse':
-      case 'PostToolUse':
         return [{ ...base, type: SIGNAL.ACTIVITY, reason: `tool:${tool}` }];
+      // PermissionRequest has no tool_use_id (schema), so the request is identified by its
+      // tool call; the call's PostToolUse resolves it. Codex runs these hooks synchronously,
+      // so a resolution cannot precede its request (`remember: false` lets an identical
+      // later call ask again).
+      case 'PermissionRequest':
+        return [{ ...base, type: SIGNAL.REQUEST_OPEN, requestId: toolCallRequestId(input), reason: `permission:${tool}` }];
+      case 'PostToolUse':
+        return [
+          { ...base, type: SIGNAL.REQUEST_CLOSE, requestId: toolCallRequestId(input), remember: false },
+          { ...base, type: SIGNAL.ACTIVITY, reason: `tool:${tool}` },
+        ];
       default:
         return [];
     }

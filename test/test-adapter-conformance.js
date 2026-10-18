@@ -187,6 +187,11 @@ export const codexSpec = {
     promptSubmit: sid => codexEvent('UserPromptSubmit', sid, { prompt: SECRET }),
     toolStart: (sid, n) => codexEvent('PreToolUse', sid, { tool_name: 'exec_command', tool_use_id: `call_${n}`, tool_input: { cmd: `${SECRET} ${n}` } }),
     toolEnd: (sid, n) => codexEvent('PostToolUse', sid, { tool_name: 'exec_command', tool_use_id: `call_${n}`, tool_input: { cmd: `${SECRET} ${n}` }, tool_response: SECRET }),
+    permissionAsk: (sid, n) => codexEvent('PermissionRequest', sid, { tool_name: 'apply_patch', tool_input: { patch: `${SECRET} ${n}` } }),
+    permissionResolve: (sid, n) => codexEvent('PostToolUse', sid, { tool_name: 'apply_patch', tool_use_id: `call_p${n}`, tool_input: { patch: `${SECRET} ${n}` }, tool_response: SECRET }),
+    // request_user_input calls no hook (codex-rs core, verified by source search).
+    questionAsk: () => null,
+    questionResolve: () => null,
   },
   malformed: [{ hook_event_name: 'PreToolUse' }, { hook_event_name: 'Stop', session_id: '../x' }, { hook_event_name: { a: 1 }, session_id: 's1' }],
   createAdapter: () => new CodexAdapter(),

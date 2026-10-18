@@ -73,6 +73,28 @@ function testActivity() {
   });
 }
 
+function testPermissions() {
+  withState((dir, state) => {
+    const exec = { tool_name: 'exec_command', tool_input: { cmd: 'npm test' } };
+    replay([
+      codexEvent('UserPromptSubmit', 'th-p'),
+      codexEvent('PreToolUse', 'th-p', { ...exec, tool_use_id: 'c1' }),
+      codexEvent('PermissionRequest', 'th-p', exec),
+    ], dir);
+    assert.strictEqual(state('th-p').status, STATUS.YOUR_TURN);
+    assert.strictEqual(state('th-p').reason, 'permission:exec_command', 'names the tool, never the command');
+    replay([
+      codexEvent('PreToolUse', 'th-p', { tool_name: 'apply_patch', tool_use_id: 'c2', tool_input: { patch: 'x' }, agent_id: 'sub' }),
+      codexEvent('PostToolUse', 'th-p', { tool_name: 'apply_patch', tool_use_id: 'c2', tool_input: { patch: 'x' }, agent_id: 'sub' }),
+    ], dir);
+    assert.strictEqual(state('th-p').status, STATUS.YOUR_TURN, 'unrelated activity keeps Your Turn');
+    replay([codexEvent('PostToolUse', 'th-p', { ...exec, tool_use_id: 'c1', tool_response: 'ok' })], dir);
+    assert.strictEqual(state('th-p').status, STATUS.COOKING, 'the approved call running resolves it');
+    replay([codexEvent('PermissionRequest', 'th-p', exec)], dir);
+    assert.strictEqual(state('th-p').status, STATUS.YOUR_TURN, 'an identical later request is shown again');
+  });
+}
+
 function testHookCommandAndConfig() {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'letitcook-codex-home-'));
   try {
@@ -103,6 +125,7 @@ function testHookCommandAndConfig() {
 function run() {
   testDetectionAndRegistration();
   testActivity();
+  testPermissions();
   testHookCommandAndConfig();
   console.log('All LetItCook Codex CLI adapter tests passed.');
 }
