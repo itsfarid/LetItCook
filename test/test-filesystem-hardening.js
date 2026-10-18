@@ -140,6 +140,8 @@ function testCopilotRejectsTraversal() {
     const adapter = new CopilotAdapter();
     const detected = adapter.detectSessions({ copilotDir, now });
     assert.deepStrictEqual(detected.map(s => s.session_id).sort(), ['fallback-dir', 'ses_ok_1']);
+    const secondTick = adapter.detectSessions({ copilotDir, now });
+    assert.deepStrictEqual(secondTick.map(s => s.session_id).sort(), ['fallback-dir', 'ses_ok_1'], 'cached tick keeps the validated id');
     assert.ok(readSessionFromDir(evilDir, { now }).session_id === 'fallback-dir');
 
     assert.strictEqual(adapter.getSessionState('../../evil', { copilotDir, now }), null);
