@@ -103,7 +103,7 @@ With the extension enabled and the plugin configured, run the end-to-end self-te
 npm run selftest -- --model deepseek/deepseek-v4-pro
 ```
 
-It starts a private, password-protected OpenCode server on `127.0.0.1` in a temporary project. Then it sends one prompt and checks each step: Cooking, then a real permission request (Your Turn), then the GNOME notification, then Cooking again after approval, then Done. It asks whether you saw the popups. It only ever approves the exact command `echo letitcook-selftest`, and it removes the session, server, and temporary project afterwards. Each run makes one short model call. Without `--model`, it uses your most recent OpenCode model. The Done notification step is skipped unless "Notify on Done" is on.
+It starts a private, password-protected OpenCode server on `127.0.0.1` in a temporary project. Then it sends one prompt and checks each step: Cooking, then a real permission request (Your Turn), then the GNOME notification, then Cooking again after approval, then Done. It asks whether you saw the popups. It only ever approves the exact command `echo letitcook-selftest`, and it removes the session, server, and temporary project afterwards. Each run makes one short model call. Pressing Ctrl+C (or sending SIGTERM) stops it cleanly: it rejects the pending request, deletes the test session, stops its server, and exits with code 130 (or 143). Without `--model`, it uses your most recent OpenCode model. The Done notification step is skipped unless "Notify on Done" is on.
 
 ### Uninstall
 
@@ -395,6 +395,7 @@ Each command is an independent test. Ready-to-run assertions are included in eve
 - Input validation: session IDs are sanitized (regex `[A-Za-z0-9][A-Za-z0-9._-]{0,127}`), file paths are validated, shell commands are avoided.
 - Logging never prints prompts, credentials, or sensitive agent messages. Structured agents and plugins must sanitize outputs before passing state to LetItCook.
 - GNOME extension notifications are delivered via the native GNOME notification system; no CLI dispatch to avoid race conditions.
+- Notification text is reduced to one short line. A Your Turn notification names only the kind of request (for example `permission.asked:bash`), never the command or its arguments. Error text in a Burn notification keeps only its first line, with credentials redacted, URLs reduced to their host, and absolute paths reduced to their last component.
 - No external dependencies. If new dependencies are added, only standard Node.js and safe open-source packages should be used.
 
 ## Project status
