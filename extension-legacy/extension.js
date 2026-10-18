@@ -182,18 +182,34 @@ function formatSessionRow(s, meta, elapsed) {
 
 // Restrict a LetItCook-owned directory to owner-only (0700), querying and
 // setting attributes with NOFOLLOW_SYMLINKS so a link is never chmod-ed by path.
-// Returns false when `path` is not a directory owned by the current user, so the
-// caller never reads or deletes session files someone else controls.
+// Returns false unless `path` is a directory owned by the current user, or a symlink owned
+// by the current user to a directory the current user owns that is already private (no
+// group/other access; a link target is never chmod-ed). Same rules as ensurePrivateDir in
+// src/core/fs-safe.js. The caller never reads or deletes session files otherwise.
 function ensurePrivateDir(path) {
     try {
         const dirFile = Gio.File.new_for_path(path);
         const flags = Gio.FileQueryInfoFlags.NOFOLLOW_SYMLINKS;
         const attrs = 'standard::type,unix::mode,owner::user';
         const info = dirFile.query_info(attrs, flags, null);
+        const user = GLib.get_user_name();
+        if (info.get_file_type() === Gio.FileType.SYMBOLIC_LINK) {
+            const target = dirFile.query_info(attrs, Gio.FileQueryInfoFlags.NONE, null); // throws if broken
+            const trusted = info.has_attribute('owner::user') &&
+                info.get_attribute_string('owner::user') === user &&
+                target.get_file_type() === Gio.FileType.DIRECTORY &&
+                target.has_attribute('owner::user') &&
+                target.get_attribute_string('owner::user') === user &&
+                target.has_attribute('unix::mode') &&
+                (target.get_attribute_uint32('unix::mode') & 0o077) === 0;
+            if (!trusted)
+                log(`[LetItCook] ${path} must link to a directory you own that others cannot access (chmod 700)`);
+            return trusted;
+        }
         if (info.get_file_type() !== Gio.FileType.DIRECTORY ||
             !info.has_attribute('unix::mode') ||
             !info.has_attribute('owner::user') ||
-            info.get_attribute_string('owner::user') !== GLib.get_user_name())
+            info.get_attribute_string('owner::user') !== user)
             return false;
         if ((info.get_attribute_uint32('unix::mode') & 0o777) === 0o700)
             return true;
@@ -352,13 +368,14 @@ class LetItCookButton extends PanelMenu.Button {
 
         let enumerator = null;
         try {
-            enumerator = dirFile.enumerate_children('standard::name', Gio.FileQueryInfoFlags.NONE, null);
+            // Only regular files are session files (writers create them by rename); symlinks are skipped.
+            enumerator = dirFile.enumerate_children('standard::name,standard::type', Gio.FileQueryInfoFlags.NOFOLLOW_SYMLINKS, null);
             let info;
             const now = Date.now();
 
             while ((info = enumerator.next_file(null)) !== null) {
                 const name = info.get_name();
-                if (!name.endsWith('.json') || name.startsWith('.')) continue;
+                if (!name.endsWith('.json') || name.startsWith('.') || info.get_file_type() !== Gio.FileType.REGULAR) continue;
 
                 const filePath = GLib.build_filenamev([this._stateDir, name]);
                 const file = Gio.File.new_for_path(filePath);

@@ -203,13 +203,13 @@ function testPrivateDirectoryPermissions() {
     assert.strictEqual(mode(custom), 0o700);
     assert.strictEqual(mode(path.join(root, 'custom')), 0o755);
 
-    // symlinks are never followed for chmod
+    // symlinks are never followed for chmod: a link to a broad target is refused instead
     const realTarget = path.join(root, 'real');
     fs.mkdirSync(realTarget);
     fs.chmodSync(realTarget, 0o755);
     const link = path.join(root, 'link');
     fs.symlinkSync(realTarget, link);
-    ensurePrivateDir(link);
+    assert.throws(() => ensurePrivateDir(link), /other users can access; run chmod 700/);
     assert.strictEqual(mode(realTarget), 0o755, 'symlink target must not be chmod-ed');
 
     // writing a session into a pre-existing 0755 directory tightens it
@@ -264,7 +264,8 @@ function loadReadSessions(target) {
 function makeFakeGio({ files = [], enumerateThrows = false, nextFileThrowsAt = -1, loadThrows = false, closeThrows = false }) {
   const state = { opened: 0, closed: 0 };
   const Gio = {
-    FileQueryInfoFlags: { NONE: 0 },
+    FileQueryInfoFlags: { NONE: 0, NOFOLLOW_SYMLINKS: 1 },
+    FileType: { REGULAR: 1, DIRECTORY: 2, SYMBOLIC_LINK: 3 },
     File: {
       new_for_path(p) {
         return {
@@ -276,7 +277,10 @@ function makeFakeGio({ files = [], enumerateThrows = false, nextFileThrowsAt = -
               next_file() {
                 if (i === nextFileThrowsAt) throw new Error('next_file failed');
                 if (i >= files.length) return null;
-                return { get_name: () => files[i++] };
+                // Entries are names (regular files) or { name, type } for other file types.
+                const entry = files[i++];
+                const { name, type } = typeof entry === 'string' ? { name: entry, type: 1 } : entry;
+                return { get_name: () => name, get_file_type: () => type };
               },
               close() {
                 state.closed++;
@@ -509,22 +513,31 @@ function testForeignStateDirIsRefused() {
 }
 
 // L12 (extension): an untrusted state directory is reported and never read or cleaned.
-function loadExtensionEnsurePrivateDir(target, { owner, type = 'dir', mode = 0o700, throws = false }) {
+function loadExtensionEnsurePrivateDir(target, { owner, type = 'dir', mode = 0o700, throws = false, link = null }) {
   const code = fs.readFileSync(path.resolve(`${target}/extension.js`), 'utf8');
   const match = code.match(/\nfunction ensurePrivateDir\(path\) \{[\s\S]*?\n\}\n/);
   assert.ok(match, `${target}: ensurePrivateDir not found`);
   const chmods = [];
-  const info = {
-    get_file_type: () => (type === 'dir' ? 2 : 1),
+  const makeInfo = (fileType, fileOwner, fileMode) => ({
+    get_file_type: () => fileType,
     has_attribute: () => true,
-    get_attribute_string: () => owner,
-    get_attribute_uint32: () => mode,
+    get_attribute_string: () => fileOwner,
+    get_attribute_uint32: () => fileMode,
+  });
+  const info = makeInfo(type === 'dir' ? 2 : 1, owner, mode);
+  // `link`: { owner, target: 'broken' | { type, owner, mode } }; NOFOLLOW queries see the link.
+  const query = (flags) => {
+    if (throws) throw new Error('query failed');
+    if (!link) return info;
+    if (flags === 1) return makeInfo(3, link.owner, 0o777);
+    if (link.target === 'broken') throw new Error('No such file or directory');
+    return makeInfo(link.target.type === 'dir' ? 2 : 1, link.target.owner, link.target.mode);
   };
   const Gio = {
-    FileQueryInfoFlags: { NOFOLLOW_SYMLINKS: 1 },
-    FileType: { DIRECTORY: 2 },
+    FileQueryInfoFlags: { NONE: 0, NOFOLLOW_SYMLINKS: 1 },
+    FileType: { DIRECTORY: 2, SYMBOLIC_LINK: 3 },
     File: { new_for_path: () => ({
-      query_info: () => { if (throws) throw new Error('query failed'); return info; },
+      query_info: (attrs, flags) => query(flags),
       set_attribute_uint32: (a, m) => { chmods.push(m); return true; },
     }) },
   };
@@ -552,6 +565,79 @@ function testExtensionRefusesForeignStateDir() {
     assert.deepStrictEqual(state, { opened: 0, closed: 0 }, `${target}: untrusted dir is not even enumerated`);
     const code = fs.readFileSync(path.resolve(`${target}/extension.js`), 'utf8');
     assert.ok(code.includes('this._stateDirTrusted = parentTrusted && dirTrusted;'), `${target}: trust decided at startup`);
+
+    // M1: symlinked state directories follow the same rules as src/core/fs-safe.js.
+    const linkCase = (link) => loadExtensionEnsurePrivateDir(target, { owner: 'unused', link });
+    const privateDir = { type: 'dir', owner: 'me', mode: 0o700 };
+    t = linkCase({ owner: 'me', target: privateDir });
+    assert.strictEqual(t.fn('/x'), true, `${target}: owned link to a private owned directory is trusted`);
+    assert.deepStrictEqual(t.chmods, [], `${target}: link target not chmod-ed`);
+    t = linkCase({ owner: 'me', target: { ...privateDir, mode: 0o755 } });
+    assert.strictEqual(t.fn('/x'), false, `${target}: link to a directory others can access is refused`);
+    assert.deepStrictEqual(t.chmods, [], `${target}: broad link target not chmod-ed`);
+    assert.strictEqual(linkCase({ owner: 'me', target: { ...privateDir, owner: 'someone-else' } }).fn('/x'), false, `${target}: foreign link target refused`);
+    assert.strictEqual(linkCase({ owner: 'someone-else', target: privateDir }).fn('/x'), false, `${target}: foreign-owned link refused`);
+    assert.strictEqual(linkCase({ owner: 'me', target: 'broken' }).fn('/x'), false, `${target}: broken link refused`);
+    assert.strictEqual(linkCase({ owner: 'me', target: { type: 'file', owner: 'me', mode: 0o600 } }).fn('/x'), false, `${target}: link to a file refused`);
+
+    // Symlinked session files are skipped, like readAllSessionsFromDir in Node.
+    const loadRead = loadReadSessions(target);
+    const fake = makeFakeGio({ files: ['a.json', { name: 'linked.json', type: 3 }, { name: 'dir.json', type: 2 }] });
+    const sessions = loadRead(fake.Gio, fake.GLib).fn.call({ _stateDir: '/fake' });
+    assert.strictEqual(sessions.length, 1, `${target}: only the regular session file is read`);
+  }
+}
+
+// M1: symlinked state directories follow one policy in Node and the extension: a link you
+// own to a private directory you own is used as is; anything else is refused, and a link
+// target is never chmod-ed.
+function testSymlinkedStateDirs() {
+  const root = mkTmp('fs-symlink-dir');
+  const realGetuid = process.getuid;
+  try {
+    // owned link -> private owned directory: accepted, writable, untouched
+    const target = path.join(root, 'elsewhere', 'sessions-data');
+    fs.mkdirSync(target, { recursive: true, mode: 0o700 });
+    const link = path.join(root, 'sessions-link');
+    fs.symlinkSync(target, link);
+    ensurePrivateDir(link);
+    writeSessionFile({ session_id: 'ses_via_link', agent: 'opencode', status: STATUS.COOKING }, link);
+    assert.ok(fs.existsSync(path.join(target, 'ses_via_link.json')), 'session written into the link target');
+    assert.strictEqual(mode(target), 0o700);
+    assert.ok(fs.lstatSync(link).isSymbolicLink(), 'link left in place');
+
+    // standard layout with a symlinked `letitcook` directory
+    const appTarget = path.join(root, 'disk', 'letitcook-data');
+    fs.mkdirSync(appTarget, { recursive: true, mode: 0o700 });
+    const state = path.join(root, 'state');
+    fs.mkdirSync(state);
+    fs.symlinkSync(appTarget, path.join(state, 'letitcook'));
+    ensurePrivateDir(path.join(state, 'letitcook', 'sessions'));
+    assert.strictEqual(mode(path.join(appTarget, 'sessions')), 0o700, 'sessions created privately inside the target');
+    fs.chmodSync(appTarget, 0o755);
+    assert.throws(() => ensurePrivateDir(path.join(state, 'letitcook', 'sessions')), /other users can access/,
+      'a broad symlinked letitcook directory is refused');
+    assert.strictEqual(mode(appTarget), 0o755, 'and not chmod-ed through the link');
+
+    // broken link and link to a file are refused
+    const broken = path.join(root, 'broken');
+    fs.symlinkSync(path.join(root, 'missing'), broken);
+    assert.throws(() => ensurePrivateDir(broken), /broken symlink/);
+    assert.strictEqual(fs.existsSync(path.join(root, 'missing')), false, 'broken link target not created');
+    const fileTarget = path.join(root, 'a-file');
+    fs.writeFileSync(fileTarget, '');
+    const toFile = path.join(root, 'to-file');
+    fs.symlinkSync(fileTarget, toFile);
+    assert.throws(() => ensurePrivateDir(toFile), /not a directory/);
+
+    // a link to a directory owned by someone else is refused
+    process.getuid = () => realGetuid.call(process) + 1;
+    assert.throws(() => ensurePrivateDir(link), /not owned by the current user/);
+    process.getuid = realGetuid;
+    assert.deepStrictEqual(fs.readdirSync(target), ['ses_via_link.json'], 'nothing else written');
+  } finally {
+    process.getuid = realGetuid;
+    fs.rmSync(root, { recursive: true, force: true });
   }
 }
 
@@ -568,6 +654,7 @@ function run() {
   testSymlinkedSessionFilesAreIgnored();
   testPruneKeepsFileRewrittenAfterRead();
   testForeignStateDirIsRefused();
+  testSymlinkedStateDirs();
   testExtensionRefusesForeignStateDir();
   testExtensionEnumeratorCleanup();
   testExtensionStateDirPermissionsSource();

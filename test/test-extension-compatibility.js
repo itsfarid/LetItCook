@@ -398,13 +398,14 @@ function loadExtensionNotificationHelpers(target) {
 
 function runExtensionReadSession(target, raw, pidAlive) {
   const Gio = {
-    FileQueryInfoFlags: { NONE: 0 },
+    FileQueryInfoFlags: { NONE: 0, NOFOLLOW_SYMLINKS: 1 },
+    FileType: { REGULAR: 1, DIRECTORY: 2, SYMBOLIC_LINK: 3 },
     File: {
       new_for_path: () => ({
         enumerate_children: () => {
           let done = false;
           return {
-            next_file: () => (done ? null : (done = true, { get_name: () => 'ses_x.json' })),
+            next_file: () => (done ? null : (done = true, { get_name: () => 'ses_x.json', get_file_type: () => 1 })),
             close() {},
           };
         },
