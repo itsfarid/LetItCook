@@ -152,6 +152,26 @@ function testUnpersistedDuplicatesStayHarmless() {
   assert.strictEqual(dupApply({ ...waiting, lifecycle: { ...waiting.lifecycle, seen: [] } }).status, STATUS.YOUR_TURN);
 }
 
+// Request ids that are inherited object member names are ordinary ids (Devin review on
+// PR #7); `__proto__` itself is outside the id format.
+function testPrototypeSensitiveRequestIds() {
+  assert.deepStrictEqual(check(protocolEvent('request.opened', { request_id: '__proto__' })), { ok: false, error: 'invalid_request_id' });
+  for (const id of ['constructor', 'toString', 'valueOf', 'hasOwnProperty']) {
+    let state = null;
+    const apply = (type, extra) => {
+      for (const sig of eventToSignals(check(protocolEvent(type, extra)).event)) {
+        const next = reduceSession(state, sig, { agent: 'mycli', now: NOW });
+        if (next) state = next;
+      }
+      return state.status;
+    };
+    apply('turn.started', { turn_id: 't1' });
+    assert.strictEqual(apply('request.opened', { turn_id: 't1', request_id: id }), STATUS.YOUR_TURN);
+    assert.strictEqual(apply('activity'), STATUS.YOUR_TURN, `${id}: activity does not hide it`);
+    assert.strictEqual(apply('request.resolved', { request_id: id }), STATUS.COOKING, `${id}: resolved by its id`);
+  }
+}
+
 function run() {
   testValidEnvelope();
   testRejectedEnvelopes();
@@ -160,6 +180,7 @@ function run() {
   testMapping();
   testEndToEndThroughReducer();
   testUnpersistedDuplicatesStayHarmless();
+  testPrototypeSensitiveRequestIds();
   console.log('All LetItCook event protocol tests passed.');
 }
 
