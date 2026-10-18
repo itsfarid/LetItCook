@@ -21,7 +21,7 @@ agent ──event──▶ adapter ──normalized session JSON──▶ state 
 - The **state directory** (`$XDG_STATE_HOME/letitcook/sessions`) is the only interface to the GNOME extension. Each session is one JSON file with `session_id`, `agent`, `status`, `reason`, `title`, `cwd`, `pid`, `created_at` and `updated_at`. The extension is agent-agnostic: it reads every regular `*.json` file and applies the same staleness and process-exit rules to all of them (`normalizeSession` in `src/core/status.js`, mirrored in both extension variants).
 - **OpenCode** pushes state from an in-process plugin (`src/adapters/opencode/plugin.js`).
 - **Copilot CLI** is replayed from its event log by `node src/sync.js --watch` (`src/adapters/copilot/adapter.js`).
-- **Hook-based agents** (Claude Code, Codex CLI) run `node src/hooks/hook.js <agent>` for each hook event. The event JSON arrives on stdin, and the hook writes `<agent>_<session>.json`.
+- **Hook-based agents** (Claude Code, Codex CLI, Gemini CLI) run `node src/hooks/hook.js <agent>` for each hook event. The event JSON arrives on stdin, and the hook writes `<agent>_<session>.json`.
 
 ### Hook-based adapters
 
@@ -123,9 +123,40 @@ Limitations:
 - **Login shell.** Hooks run through `$SHELL -lc`. A login profile that prints to stdout could produce output Codex rejects from `Stop` and `Interrupt` hooks. The LetItCook hook itself prints nothing.
 - **Clean shutdown only.** `SessionEnd` runs only on a clean shutdown. A killed Codex leaves the session to the process-exit rule (Unknown, then removed after an hour).
 
-## Gemini CLI and Goose (not implemented yet)
+## Gemini CLI (partial: never Done or Burn)
 
-Both have documented hooks, but neither reports how a turn ended. Their research notes, and the reasons support is limited or deferred, are tracked in the pull request that introduced these adapters.
+**Verified against:**
+- the hooks documentation bundled with the installed Gemini CLI 0.56.0 (`bundle/docs/hooks/`, the same text as https://geminicli.com/docs/hooks/);
+- the installed bundle itself, for the hook runner, `HookEventHandler`, the tool scheduler and the settings schema.
+
+**Status:** implemented and fixture-tested; not run against the real CLI or verified in GNOME. Hooks are enabled by default (`hooksConfig.enabled`).
+
+| Hook event | Signal |
+|---|---|
+| `BeforeAgent` | `turn_start` |
+| `BeforeTool` | `activity`. It runs before the tool's confirmation, so it never resolves a request |
+| `Notification` (`ToolPermission`, the only type) | `request_open`: `permission:<kind>`, or `question` for the `ask_user` tool |
+| `AfterTool` | Resolves the waiting confirmation, then `activity` |
+| `AfterAgent` | `turn_end`: Your Turn, **not** Done |
+| `SessionEnd` | `session_end` |
+
+Limitations:
+
+- **No Done or Burn.** `AfterAgent` fires after a successful turn and also after API errors, loop detection, the turn limit, and a cancel while the model is streaming. It has no outcome field, so every finished turn shows Your Turn (and notifies), like Copilot's `assistant.turn_end`. Guessing the outcome from the response text would be unreliable.
+- **Unanswered cancels stay Your Turn.** A cancel while a confirmation is open fires no hook. The session stays Your Turn until the next prompt.
+- **Resolution by tool completion.** Notifications carry no tool call id, so any `AfterTool` resolves the waiting confirmation. That relies on the scheduler executing no tool of a batch while one of its calls awaits confirmation, which was verified in the 0.56 bundle. It does not hold for a subagent (`invoke_agent`) asking for confirmation while another tool of the parent's batch finishes, nor for a sandbox expansion request on a tool that is already running.
+- **Subagents** run as the `invoke_agent` tool and their hooks carry no agent id. They show as the parent's activity.
+- **Execution.** Hooks run synchronously through `bash -c`. Project-level hooks need a trusted folder; the user-level `~/.gemini/settings.json` is used here.
+
+## Goose (deferred)
+
+Goose 1.46 has documented lifecycle hooks: Open Plugins, `~/.agents/plugins/<name>/hooks/hooks.json`. Verified against https://goose-docs.ai/docs/guides/context-engineering/hooks/ and the `aaif-goose/goose` source at tag v1.46.0. The adapter is deferred anyway, because:
+
+- **Approvals are invisible.** No hook fires while Goose waits for tool approval. `PreToolUse` fires only after a call is approved. In the approval modes, LetItCook would show Cooking while Goose actually needs the user, which is exactly the misleading state the status model forbids.
+- **Stop has no outcome.** `Stop` fires at the end of every reply, including provider errors and cancellation, so it supports neither Done nor Burn.
+- **The session database is internal.** Goose's SQLite store is undocumented as an interface and on schema version 16. It records no approval or error state. Reading it would also need a SQLite dependency on Node.js < 22.5.
+
+A Goose adapter becomes reasonable once Goose exposes a hook for approval requests, or if LetItCook could reliably limit the adapter to the fully automatic mode.
 
 ## Adding an adapter
 

@@ -36,7 +36,8 @@ When a supported agent requires user interaction, LetItCook can display a GNOME 
 | GitHub Copilot CLI | ✅ Supported | Session-event log replay (`~/.copilot/session-state/*/events.jsonl` + `workspace.yaml`) via polling |
 | Claude Code | 🧪 New, fixture-tested only | Official command hooks (`UserPromptSubmit`, tool, permission, `Stop`/`StopFailure`, subagent and session events) |
 | Codex CLI | 🧪 New, fixture-tested only | Official command hooks (`UserPromptSubmit`, tool, `PermissionRequest`, `Stop`, `Interrupt`, subagent and session events); never `Burn` |
-| Gemini CLI, Goose | ⚠️ Detected but unsupported | No adapter yet |
+| Gemini CLI | 🧪 New, fixture-tested only, partial | Official command hooks; every finished turn is `Your Turn` (never `Done` or `Burn`) |
+| Goose | ⏸️ Deferred | No hook fires for approval requests; see [docs/adapters.md](docs/adapters.md#goose-deferred) |
 
 See [docs/adapters.md](docs/adapters.md) for how each agent's events map to the states, what each one cannot report, and how adapters are tested. [AGENTS.md §28](AGENTS.md#28-agent-adapter-status) has the per-state reliability notes.
 
@@ -113,7 +114,7 @@ It starts a private, password-protected OpenCode server on `127.0.0.1` in a temp
 gnome-extensions uninstall letitcook@letitcook.local
 ```
 
-Then remove the plugin entry from your OpenCode config and the LetItCook entries from your Claude Code settings and `~/.codex/hooks.json`, stop any `src/sync.js --watch` process, and optionally delete `~/.local/state/letitcook/`.
+Then remove the plugin entry from your OpenCode config and the LetItCook entries from your Claude Code and Gemini CLI settings and `~/.codex/hooks.json`, stop any `src/sync.js --watch` process, and optionally delete `~/.local/state/letitcook/`.
 
 ### Claude Code setup (if using Claude Code)
 
@@ -137,6 +138,16 @@ node src/hooks/hook.js --print-config codex
 
 Review it and merge it into `~/.codex/hooks.json`, creating the file if needed. Then open `/hooks` in Codex and trust the new hooks; Codex does not run them until you do. To disable them, remove the entries or untrust them in `/hooks`. `[features] hooks = false` in `~/.codex/config.toml` turns off all hooks.
 
+### Gemini CLI setup (if using Gemini CLI)
+
+Gemini CLI reports state through its [hooks](https://geminicli.com/docs/hooks/), which are enabled by default. Print the block for your clone:
+
+```bash
+node src/hooks/hook.js --print-config gemini
+```
+
+Review it and merge its `hooks` entries into `~/.gemini/settings.json`, then restart Gemini CLI. The hooks are named `letitcook-<event>`, so you can disable them with `/hooks disable`, list them under `hooksConfig.disabled`, or remove them.
+
 ### Copilot CLI setup (if using GitHub Copilot CLI)
 
 Copilot sessions appear in the panel only when `node src/sync.js --watch` (or a systemd timer) runs. Start it once:
@@ -151,7 +162,7 @@ For persistent operation, run it as a systemd user service or Cron job.
 
 | Path | Data | Generated / User-editable | Safe to delete |
 |---|---|---|---|
-| `~/.local/state/letitcook/sessions/` | Session state files (`{session_id}.json`, `copilot_{session_id}.json`, `claude_{session_id}.json`, `codex_{session_id}.json`) | Generated on first start | Sessions are recreated from adapter sources |
+| `~/.local/state/letitcook/sessions/` | Session state files (`{session_id}.json`, `copilot_{session_id}.json`, `claude_{session_id}.json`, `codex_{session_id}.json`, `gemini_{session_id}.json`) | Generated on first start | Sessions are recreated from adapter sources |
 | `~/.local/state/letitcook/notify_cache.json` | Notification state (deduplication, notify-on-Done toggle) | Generated on first start | Deleting it resets notification state (opt-out) |
 | `~/.copilot/` | Copilot CLI state | Copilot-generated | Do not delete Copilot state unless you want to restart Copilot completely |
 
@@ -195,6 +206,7 @@ These describe current behavior and have not all been confirmed in day-to-day us
 - **Claude Code**: pressing Esc while the model is thinking (no tool running) fires no hook, so the session stays `Cooking` and becomes `Unknown` after 5 minutes. Esc while a tool runs shows `Your Turn`.
 - **Claude Code**: denying a permission in the dialog fires no hook. The session stays `Your Turn` (the turn has stopped) until your next prompt.
 - **Codex CLI**: no hook reports a failed turn, so a turn that errors stays `Cooking` and becomes `Unknown` after 5 minutes; it is never `Burn`. Questions (`request_user_input`) are not shown as `Your Turn`.
+- **Gemini CLI**: Gemini's end-of-turn hook does not say whether the turn succeeded, so every finished turn shows `Your Turn` and notifies. Gemini sessions are never `Done` or `Burn`.
 - **Copilot CLI**: Copilot records no process id, so the sync bridge stops showing a session (including `Your Turn`) one hour after its last event. Only `Cooking` sessions are kept longer, until they go stale.
 
 ## Notifications
@@ -263,7 +275,7 @@ node src/notify.js --test          # - Send one manual test notification via not
 ### Implementation notes
 
 - OpenCode writes state files directly via its plugin hooks (`event`, `tool.execute.before/after`). No CLI bridge needed.
-- Claude Code and Codex CLI run `node src/hooks/hook.js <agent>` for each hook event. The shared hook bridge maps the event through the adapter and the shared lifecycle contract into the state directory (see [docs/adapters.md](docs/adapters.md)).
+- Claude Code, Codex CLI and Gemini CLI run `node src/hooks/hook.js <agent>` for each hook event. The shared hook bridge maps the event through the adapter and the shared lifecycle contract into the state directory (see [docs/adapters.md](docs/adapters.md)).
 - Copilot CLI is poll-based. `node src/sync.js` repeatedly replays its session-event log into the state directory. The Copilot adapter cannot push; the polling script bridges to the shared state dir.
 - GNOME monitors state directory changes (directory monitor) and falls back to periodic polling (2-second interval).
 - Notifications are evaluated per-session with state transitions (from last-seen status).
