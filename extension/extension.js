@@ -605,6 +605,7 @@ class LetItCookButton extends PanelMenu.Button {
         }
         if (this._dirMonitor) {
             this._dirMonitor.disconnect(this._dirMonitorId);
+            this._dirMonitor.cancel();
             this._dirMonitor = null;
         }
         if (this._menuOpenId && this.menu) {
