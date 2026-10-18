@@ -1,5 +1,6 @@
 import { OpenCodeAdapter } from '../adapters/opencode/adapter.js';
 import { CopilotAdapter } from '../adapters/copilot/adapter.js';
+import { ClaudeAdapter } from '../adapters/claude/hooks.js';
 import { aggregateState } from './status.js';
 
 export class AdapterRegistry {
@@ -74,6 +75,7 @@ export function createDefaultRegistry() {
   const registry = new AdapterRegistry();
   registry.register(new OpenCodeAdapter());
   registry.register(new CopilotAdapter());
+  registry.register(new ClaudeAdapter());
   return registry;
 }
 
