@@ -73,7 +73,7 @@ function applyPendingRequests(status, reason, pending) {
 }
 
 export function extractSessionId(event) {
-  if (!event) return null;
+  if (!event || typeof event.type !== 'string') return null;
   const p = event.properties || {};
   return p.sessionID || p.sessionId || (p.session && p.session.id) || (p.info && p.info.sessionID) ||
     (p.part && p.part.sessionID) || (event.type.startsWith('session.') && p.info && p.info.id) || null;
@@ -92,7 +92,7 @@ export function extractTitle(event) {
 }
 
 export function mapOpenCodeEvent(event, previousState = null) {
-  if (!event || !event.type) return null;
+  if (!event || typeof event.type !== 'string' || !event.type) return null;
 
   const sessionId = extractSessionId(event) || (previousState ? previousState.session_id : null);
   if (!sessionId || sessionId === 'global') return null;
