@@ -12,6 +12,7 @@ import {
   OpenCodeAdapter,
 } from '../src/adapters/opencode/adapter.js';
 import { CopilotAdapter, readSessionFromDir } from '../src/adapters/copilot/adapter.js';
+import { runNotify } from '../src/notify.js';
 
 const BAD_IDS = [
   '../../evil', '..', '.', '../x', 'a/b', 'a\\b', '/etc/passwd', '.hidden', '',
@@ -406,6 +407,80 @@ function testSessionDirFollowsXdgStateHome() {
   }
 }
 
+// A file claiming another session's id (crafted or buggy) must never cause that other
+// session's file to be deleted, and read-only inspection must not delete anything.
+function testCraftedSessionCannotDeleteAnother() {
+  const root = mkTmp('fs-crafted');
+  try {
+    const dir = path.join(root, 'sessions');
+    fs.mkdirSync(dir);
+    const victim = path.join(dir, 'ses_victim.json');
+    const crafted = path.join(dir, 'ses_other.json');
+    const victimData = JSON.stringify({ session_id: 'ses_victim', agent: 'opencode', status: STATUS.YOUR_TURN, updated_at: Date.now() });
+    const craftedData = JSON.stringify({ session_id: 'ses_victim', agent: 'opencode', status: STATUS.DONE, terminated: true, updated_at: Date.now() });
+    fs.writeFileSync(victim, victimData);
+    fs.writeFileSync(crafted, craftedData);
+
+    const result = runNotify({ sessionDir: dir, cachePath: path.join(root, 'notify_cache.json') });
+    assert.strictEqual(result.ok, true);
+    assert.strictEqual(fs.readFileSync(victim, 'utf8'), victimData, 'inspection leaves the live session untouched');
+    assert.strictEqual(fs.readFileSync(crafted, 'utf8'), craftedData, 'inspection deletes nothing, even terminated files');
+    assert.strictEqual(fs.existsSync(path.join(root, 'notify_cache.json')), false, 'inspection writes no cache');
+
+    const sessions = readAllSessionsFromDir(dir);
+    assert.deepStrictEqual(sessions.map(s => s.session_id), ['ses_victim']);
+    assert.strictEqual(fs.readFileSync(victim, 'utf8'), victimData, 'pruning never deletes another session file');
+    assert.strictEqual(fs.existsSync(crafted), false, 'pruning removes the terminated file that was read');
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+}
+
+function testSymlinkedSessionFilesAreIgnored() {
+  const root = mkTmp('fs-symlink');
+  try {
+    const dir = path.join(root, 'sessions');
+    fs.mkdirSync(dir);
+    const outside = path.join(root, 'outside.json');
+    const outsideData = JSON.stringify({ session_id: 'ses_outside', agent: 'opencode', status: STATUS.DONE, terminated: true });
+    fs.writeFileSync(outside, outsideData);
+    fs.symlinkSync(outside, path.join(dir, 'ses_link.json'));
+
+    assert.deepStrictEqual(readAllSessionsFromDir(dir), [], 'symlinked file is not read as a session');
+    assert.ok(fs.lstatSync(path.join(dir, 'ses_link.json')).isSymbolicLink(), 'symlink is not deleted');
+    assert.strictEqual(fs.readFileSync(outside, 'utf8'), outsideData, 'symlink target untouched');
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+}
+
+// A terminated file that a live writer replaces between read and prune must survive.
+function testPruneKeepsFileRewrittenAfterRead() {
+  const root = mkTmp('fs-race');
+  const originalLstat = fs.lstatSync;
+  try {
+    const dir = path.join(root, 'sessions');
+    fs.mkdirSync(dir);
+    const file = path.join(dir, 'ses_race.json');
+    fs.writeFileSync(file, JSON.stringify({ session_id: 'ses_race', agent: 'opencode', status: STATUS.DONE, terminated: true }));
+    const fresh = JSON.stringify({ session_id: 'ses_race', agent: 'opencode', status: STATUS.COOKING, updated_at: Date.now() });
+    let calls = 0;
+    fs.lstatSync = (target, ...rest) => {
+      if (target === file && ++calls === 2) { // the pre-delete check: a writer renames a new file in
+        fs.writeFileSync(`${file}.tmp`, fresh);
+        fs.renameSync(`${file}.tmp`, file);
+      }
+      return originalLstat(target, ...rest);
+    };
+    readAllSessionsFromDir(dir);
+    assert.strictEqual(calls, 2, 'file checked again before deletion');
+    assert.strictEqual(fs.readFileSync(file, 'utf8'), fresh, 'rewritten file is kept');
+  } finally {
+    fs.lstatSync = originalLstat;
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+}
+
 function run() {
   testSessionIdValidator();
   testOpenCodeRejectsTraversal();
@@ -415,6 +490,9 @@ function run() {
   testCopilotSyncCreatesPrivateDir();
   testSessionFilesArePrivate();
   testSessionDirFollowsXdgStateHome();
+  testCraftedSessionCannotDeleteAnother();
+  testSymlinkedSessionFilesAreIgnored();
+  testPruneKeepsFileRewrittenAfterRead();
   testExtensionEnumeratorCleanup();
   testExtensionStateDirPermissionsSource();
   console.log('All LetItCook filesystem hardening tests passed.');
