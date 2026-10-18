@@ -137,6 +137,8 @@ function cleanNotificationText(value, maxLen) {
     let text = boundNotificationText(notificationFirstLine(value)); // drops stack traces and dumps
     text = text.replace(/\u001b\[[0-9;?]*[ -\/]*[@-~]/g, ''); // ANSI escape sequences
     text = text.replace(/[\u0000-\u001f\u007f-\u009f]/g, ' ');
+    // Invisible direction overrides/isolates and zero-width spaces (ZWNJ/ZWJ kept for scripts and emoji)
+    text = text.replace(/[\u061c\u200b\u200e\u200f\u202a-\u202e\u2060\u2066-\u2069\ufeff]/g, '');
     text = redactNotificationSecrets(text);
     text = text.replace(/[A-Za-z0-9+/_=-]{32,}/g, '[redacted]'); // long tokens and keys
     text = text.replace(/\s+/g, ' ').trim();
