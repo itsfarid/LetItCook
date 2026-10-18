@@ -116,6 +116,11 @@ async function testPendingPermissionRequestsKeepYourTurn() {
   await emit('question.replied', { sessionID: 'pending_q', requestID: 'que_2', answers: [] });
   assert.strictEqual(state('pending_q').status, STATUS.COOKING, 'all questions answered');
 
+  // Question requests are labelled as questions, not as permission requests.
+  assert.strictEqual(mapOpenCodeEvent({ type: 'question.asked', properties: { id: 'q', sessionID: 's', questions: [] } }).reason, 'question.asked:question');
+  assert.strictEqual(mapOpenCodeEvent({ type: 'question.v2.asked', properties: { id: 'q', sessionID: 's', questions: [] } }).reason, 'question.v2.asked:question');
+  assert.strictEqual(mapOpenCodeEvent({ type: 'permission.asked', properties: { id: 'p', sessionID: 's' } }).reason, 'permission.asked:permission requested');
+
   // v2 question events: rejecting the last pending question resumes Cooking.
   await emit('message.updated', { info: { id: 'u_q2', sessionID: 'pending_q2', role: 'user' } });
   await emit('question.v2.asked', { id: 'que_v2_1', sessionID: 'pending_q2', questions: [] });
