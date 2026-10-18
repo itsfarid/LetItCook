@@ -16,8 +16,11 @@ import { getSessionDir } from '../adapters/opencode/adapter.js';
 
 // Hook payloads can carry whole tool outputs; anything larger is ignored (and drained).
 export const MAX_INPUT_BYTES = 16 * 1024 * 1024;
-const LOCK_TIMEOUT_MS = 1000;
-const LOCK_STALE_MS = 10 * 1000;
+// A holder keeps the lock for a few milliseconds. A lock older than LOCK_STALE_MS was left
+// by a hook that crashed or was killed and is broken; the wait stays well inside the
+// shortest agent hook timeout (3 s for Codex).
+const LOCK_TIMEOUT_MS = 2000;
+const LOCK_STALE_MS = 1000;
 const MAX_STATE_FILE_BYTES = 256 * 1024;
 
 export async function readBoundedStdin(stream = process.stdin, maxBytes = MAX_INPUT_BYTES) {
@@ -86,8 +89,8 @@ function sleepMs(ms) {
 
 // Serializes the read-modify-write of one session file between concurrent hook
 // processes (agents may run hooks for parallel tool calls at the same time). Returns a
-// release function, or null when the lock could not be taken in time: the update then
-// proceeds unlocked rather than blocking the agent.
+// release function, or null when the lock could not be taken in time: the update is then
+// skipped, because writing unlocked could replace another hook's waiting request.
 export function acquireLock(lockPath, { timeoutMs = LOCK_TIMEOUT_MS, staleMs = LOCK_STALE_MS } = {}) {
   const deadline = Date.now() + timeoutMs;
   for (;;) {
@@ -141,14 +144,15 @@ export function stateFileName(agent, sessionId) {
 
 // Applies an adapter's signals to the state directory. Returns the records written or
 // removed (for tests and diagnostics).
-export function applySignals(agent, signals, { stateDir = getSessionDir(), now = Date.now(), pid = null } = {}) {
+export function applySignals(agent, signals, { stateDir = getSessionDir(), now = Date.now(), pid = null, lockTimeoutMs = LOCK_TIMEOUT_MS } = {}) {
   const results = [];
   if (!Array.isArray(signals) || signals.length === 0) return results;
   ensurePrivateDir(stateDir);
   for (const signal of signals) {
     if (!signal || !isValidSessionId(signal.sessionId)) continue;
     const filePath = path.join(stateDir, stateFileName(agent, signal.sessionId));
-    const release = acquireLock(path.join(stateDir, `.${stateFileName(agent, signal.sessionId)}.lock`));
+    const release = acquireLock(path.join(stateDir, `.${stateFileName(agent, signal.sessionId)}.lock`), { timeoutMs: lockTimeoutMs });
+    if (!release) continue;
     try {
       const prev = readStateFile(filePath, { sessionId: signal.sessionId, agent });
       const next = reduceSession(prev, signal, { agent, now, pid });
@@ -162,7 +166,7 @@ export function applySignals(agent, signals, { stateDir = getSessionDir(), now =
       }
       results.push(next);
     } finally {
-      if (release) release();
+      release();
     }
   }
   return results;
