@@ -5,6 +5,12 @@ import { runConformance, SECRET } from './conformance/adapter-conformance.js';
 import { STATUS } from '../src/core/status.js';
 import { mapOpenCodeEvent, mapToolHook, OpenCodeAdapter } from '../src/adapters/opencode/adapter.js';
 import { mapCopilotEvent, CopilotAdapter } from '../src/adapters/copilot/adapter.js';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { reduceSession } from '../src/core/lifecycle.js';
+import { applySignals, readStateFile, stateFileName } from '../src/hooks/bridge.js';
+import { claudeHooks, ClaudeAdapter } from '../src/adapters/claude/hooks.js';
 
 // Applies a fixture that may be a single event or a sequence of events.
 function sequenced(stepOne) {
@@ -105,7 +111,57 @@ export const copilotSpec = {
   sourceFiles: ['src/adapters/copilot/adapter.js'],
 };
 
-export const SPECS = [openCodeSpec, copilotSpec];
+// --- Hook adapters (src/hooks/bridge.js + the shared lifecycle reducer) ---
+function hookStep(hooks) {
+  return sequenced((prev, input, now) => {
+    let state = prev;
+    for (const signal of hooks.toSignals(input)) {
+      const next = reduceSession(state && !state.deleted ? state : null, signal, { agent: hooks.id, now });
+      if (next) state = next;
+    }
+    return state === prev ? null : state;
+  });
+}
+
+function hookReplayThroughFiles(hooks) {
+  return (sid, events) => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), `letitcook-conformance-${hooks.id}-`));
+    try {
+      return events.map((event) => {
+        for (const input of Array.isArray(event) ? event : [event]) {
+          applySignals(hooks.id, hooks.toSignals(input), { stateDir: dir, pid: null });
+        }
+        const file = path.join(dir, stateFileName(hooks.id, sid));
+        if (!fs.existsSync(file)) return 'removed';
+        return readStateFile(file, { sessionId: sid, agent: hooks.id }).status;
+      });
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  };
+}
+
+// --- Claude Code: command hooks (src/adapters/claude/hooks.js) ---
+const claudeEvent = (event, sid, extra = {}) => ({
+  session_id: sid, prompt_id: 'p', transcript_path: '/t.jsonl', cwd: '/work', permission_mode: 'default',
+  hook_event_name: event, ...extra,
+});
+export const claudeSpec = {
+  id: 'claude',
+  step: hookStep(claudeHooks),
+  replayThroughFiles: hookReplayThroughFiles(claudeHooks),
+  fixtures: {
+    promptSubmit: sid => claudeEvent('UserPromptSubmit', sid, { prompt: SECRET }),
+    toolStart: (sid, n) => claudeEvent('PreToolUse', sid, { tool_name: 'Bash', tool_use_id: `toolu_${n}`, tool_input: { command: `${SECRET} ${n}` } }),
+    toolEnd: (sid, n) => claudeEvent('PostToolUse', sid, { tool_name: 'Bash', tool_use_id: `toolu_${n}`, tool_input: { command: `${SECRET} ${n}` }, tool_response: { stdout: SECRET } }),
+  },
+  malformed: [{ hook_event_name: 'PreToolUse' }, { hook_event_name: 'Stop', session_id: '../x' }, { hook_event_name: ['Stop'], session_id: 's1' }],
+  createAdapter: () => new ClaudeAdapter(),
+  binEnv: ['CLAUDE_BIN'],
+  sourceFiles: ['src/adapters/claude/hooks.js', 'src/adapters/hook-adapter.js', 'src/core/lifecycle.js'],
+};
+
+export const SPECS = [openCodeSpec, copilotSpec, claudeSpec];
 
 function run() {
   for (const spec of SPECS) {

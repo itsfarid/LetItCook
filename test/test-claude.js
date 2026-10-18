@@ -89,16 +89,85 @@ function testHookCommandIsAPureObserver() {
   }
 }
 
-function testSkeletonIgnoresInput() {
-  assert.strictEqual(claudeHooks.id, 'claude');
-  assert.deepStrictEqual(claudeHooks.toSignals({}), []);
+// A Claude Code hook input as documented: common fields plus event-specific ones.
+export function claudeEvent(event, sessionId, extra = {}) {
+  return {
+    session_id: sessionId,
+    prompt_id: 'p1',
+    transcript_path: `/home/u/.claude/projects/x/${sessionId}.jsonl`,
+    cwd: '/work/project',
+    permission_mode: 'default',
+    hook_event_name: event,
+    ...extra,
+  };
+}
+
+// Reduces a sequence of hook inputs through the adapter and the shared contract.
+export function replay(inputs, dir) {
+  for (const input of inputs) applySignals('claude', claudeHooks.toSignals(input), { stateDir: dir, pid: 4242 });
+  return new ClaudeAdapter();
+}
+
+function testIgnoresMalformedInput() {
+  for (const input of [null, {}, { hook_event_name: 7, session_id: 's' }, { hook_event_name: 'Unknown', session_id: 's' }, 'x']) {
+    assert.deepStrictEqual(claudeHooks.toSignals(input), [], `ignores ${JSON.stringify(input)}`);
+  }
+}
+
+function testActivityAndIdentity() {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'letitcook-claude-activity-'));
+  try {
+    const secret = 'sk-ant-SECRET-PROMPT-TEXT';
+    const adapter = replay([
+      claudeEvent('UserPromptSubmit', 'sess-a', { prompt: secret, session_title: 'Fix the login bug' }),
+      claudeEvent('PreToolUse', 'sess-a', { tool_name: 'Bash', tool_use_id: 'toolu_1', tool_input: { command: secret } }),
+    ], dir);
+    let state = adapter.getSessionState('sess-a', { baseDir: dir });
+    assert.strictEqual(state.status, STATUS.COOKING);
+    assert.strictEqual(state.reason, 'tool:Bash');
+    assert.strictEqual(state.cwd, '/work/project');
+    assert.strictEqual(state.title, 'Fix the login bug');
+    assert.strictEqual(state.pid, 4242);
+    replay([claudeEvent('PostToolUse', 'sess-a', { tool_name: 'Bash', tool_use_id: 'toolu_1', tool_response: { stdout: secret } })], dir);
+    state = adapter.getSessionState('sess-a', { baseDir: dir });
+    assert.strictEqual(state.status, STATUS.COOKING);
+    assert.ok(!fs.readFileSync(path.join(dir, 'claude_sess-a.json'), 'utf8').includes(secret), 'no prompt or tool content is stored');
+
+    replay([claudeEvent('PostToolUseFailure', 'sess-a', { tool_name: 'mcp__srv__do it;rm', tool_use_id: 'toolu_2', error: 'boom' })], dir);
+    assert.strictEqual(adapter.getSessionState('sess-a', { baseDir: dir }).reason, 'tool:mcp__srv__doitrm', 'tool names are reduced to identifiers');
+    assert.strictEqual(adapter.getSessionState('sess-a', { baseDir: dir }).status, STATUS.COOKING, 'a failing tool is not Burn');
+
+    replay([claudeEvent('UserPromptSubmit', 'sess-b', {})], dir);
+    assert.deepStrictEqual(adapter.detectSessions({ baseDir: dir }).map(x => x.session_id).sort(), ['sess-a', 'sess-b'], 'sessions are separate');
+    replay([claudeEvent('PreToolUse', '../escape', { tool_name: 'Bash' })], dir);
+    assert.ok(!fs.existsSync(path.join(path.dirname(dir), 'claude_..')), 'unsafe session ids are ignored');
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+function testHookCommandEndToEnd() {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'letitcook-claude-e2e-'));
+  try {
+    runHookCommand('claude', claudeEvent('UserPromptSubmit', 'sess-e2e', { prompt: 'hi' }), home);
+    const file = path.join(home, 'letitcook', 'sessions', 'claude_sess-e2e.json');
+    const state = JSON.parse(fs.readFileSync(file, 'utf8'));
+    assert.strictEqual(state.status, STATUS.COOKING);
+    assert.strictEqual(state.agent, 'claude');
+    assert.strictEqual(state.pid, process.pid, 'the pid is the process that ran the hook');
+    assert.strictEqual(fs.statSync(file).mode & 0o777, 0o600);
+  } finally {
+    fs.rmSync(home, { recursive: true, force: true });
+  }
 }
 
 function run() {
   testDetection();
   testDetectSessionsReadsOnlyClaudeFiles();
   testHookCommandIsAPureObserver();
-  testSkeletonIgnoresInput();
+  testIgnoresMalformedInput();
+  testActivityAndIdentity();
+  testHookCommandEndToEnd();
   console.log('All LetItCook Claude Code adapter tests passed.');
 }
 
