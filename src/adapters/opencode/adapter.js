@@ -38,7 +38,8 @@ export function hasMeaningfulStateChange(prev, next) {
     prev._completionCandidate !== next._completionCandidate ||
     prev._lastUserMessageId !== next._lastUserMessageId ||
     JSON.stringify(prev._toolMessageIds || []) !== JSON.stringify(next._toolMessageIds || []) ||
-    JSON.stringify(prev._pendingRequests || {}) !== JSON.stringify(next._pendingRequests || {})
+    JSON.stringify(prev._pendingRequests || {}) !== JSON.stringify(next._pendingRequests || {}) ||
+    prev._completionMessageId !== next._completionMessageId
   );
 }
 
@@ -190,6 +191,11 @@ export function mapOpenCodeEvent(event, previousState = null) {
           status = previousState ? previousState.status : STATUS.COOKING;
           reason = previousState ? previousState.reason : 'user message updated';
         }
+      } else if (info.role === 'assistant' && previousState?.status === STATUS.DONE &&
+                 typeof info.id === 'string' && info.id === previousState._completionMessageId) {
+        // A late or duplicate update of the message that completed the turn keeps Done.
+        status = previousState.status;
+        reason = previousState.reason;
       } else if (info.role === 'assistant') {
         const toolMessageIds = previousState?._toolMessageIds || [];
         const completedAt = info.time?.completed;
@@ -252,6 +258,7 @@ export function mapOpenCodeEvent(event, previousState = null) {
   let lastUserMessageId = previousState?._lastUserMessageId;
   let toolMessageIds = previousState?._toolMessageIds || [];
   let completionCandidate = false;
+  let completionMessageId = previousState?._completionMessageId;
 
   const isNewUserMessage = event.type === 'message.updated' && info.role === 'user' &&
     ((typeof info.id === 'string' && Boolean(info.id))
@@ -262,19 +269,21 @@ export function mapOpenCodeEvent(event, previousState = null) {
     lastUserMessageId = info.id;
     toolMessageIds = [];
     completionCandidate = false;
+    completionMessageId = undefined;
   } else if (event.type === 'message.part.updated' && p.part?.type === 'tool' && typeof p.part.messageID === 'string') {
     toolMessageIds = [...new Set([...toolMessageIds, p.part.messageID])];
     completionCandidate = false;
   } else if (event.type === 'message.updated' && info.role === 'assistant') {
     const completedAt = info.time?.completed;
     const finish = info.finish;
-    completionCandidate =
+    completionCandidate = status !== STATUS.DONE &&
       Number.isFinite(completedAt) && completedAt > 0 &&
       typeof finish === 'string' && finish.length > 0 &&
       finish !== 'tool-calls' && finish !== 'unknown' &&
       !info.error && info.summary !== true &&
       !toolMessageIds.includes(info.id) &&
       typeof lastUserMessageId === 'string' && info.parentID === lastUserMessageId;
+    if (completionCandidate) completionMessageId = info.id;
   } else if (isIdleStatusEvent(event, p)) {
     completionCandidate = false;
   } else if (status === STATUS.DONE || status === STATUS.BURN || status === STATUS.YOUR_TURN) {
@@ -296,6 +305,7 @@ export function mapOpenCodeEvent(event, previousState = null) {
     _lastUserMessageId: lastUserMessageId,
     _toolMessageIds: toolMessageIds,
     _completionCandidate: completionCandidate,
+    _completionMessageId: completionMessageId,
     _pendingRequests: pendingRequests,
   };
 }
@@ -338,6 +348,7 @@ export function mapToolHook(stage, input, previousState = null) {
     _lastUserMessageId: previousState?._lastUserMessageId,
     _toolMessageIds: previousState?._toolMessageIds || [],
     _completionCandidate: false,
+    _completionMessageId: previousState?._completionMessageId,
     _pendingRequests: pendingRequests,
   };
 }
@@ -351,7 +362,7 @@ export function writeSessionFile(session, baseDir) {
   const tmpPath = path.join(targetDir, `.${sessionId}.${process.pid}.${Date.now()}.tmp`);
 
   // Completion bookkeeping is process-local and must not leak into the normalized state file.
-  const { _lastUserMessageId, _toolMessageIds, _completionCandidate, _pendingRequests, ...persistedSession } = session;
+  const { _lastUserMessageId, _toolMessageIds, _completionCandidate, _completionMessageId, _pendingRequests, ...persistedSession } = session;
   // ponytail: atomic rename on POSIX, upgrade to lockfile if cross-device issues occur
   fs.writeFileSync(tmpPath, JSON.stringify(persistedSession, null, 2), { encoding: 'utf8', mode: 0o600 });
   fs.renameSync(tmpPath, filePath);
