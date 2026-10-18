@@ -56,13 +56,15 @@ export function validateLines(lines) {
     }
     const status = entry.state ? entry.state.status : 'removed';
     if (entry.state) entry.reached.add(status);
+    // Kept after the session ends, for the summary.
+    if (entry.state && Array.isArray(entry.state.capabilities)) entry.capabilities = entry.state.capabilities;
     sessions.set(key, entry);
     results.push({ line: number, result: changed ? 'accepted' : 'no_effect', type: event.type, session: key, status });
   });
   const summary = [...sessions].map(([key, entry]) => ({
     session: key,
     reached: [...entry.reached].sort(),
-    capabilities: entry.state?.capabilities ?? null,
+    capabilities: entry.capabilities ?? null,
   }));
   return { results, summary, rejected: results.filter(r => r.result === 'rejected').length };
 }

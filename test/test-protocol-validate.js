@@ -20,6 +20,7 @@ function testReport() {
     ev(6, 'turn.paused'),
     'not json',
     ev(7, 'activity', { subject: `${secret} x` }),
+    ev(8, 'session.ended'),
     JSON.stringify({ schema: 1, agent: 'claude', session_id: 's', event_id: 'x', type: 'activity', time: T }),
     '',
   ];
@@ -35,7 +36,8 @@ function testReport() {
     '7:ignored:unknown_type',
     '8:rejected:invalid_json',
     '9:rejected:invalid_subject',
-    '10:rejected:reserved_agent',
+    '10:accepted:removed',
+    '11:rejected:reserved_agent',
   ]);
   assert.strictEqual(rejected, 3);
   assert.deepStrictEqual(summary, [{ session: 'mycli/s1', reached: ['cooking', 'done', 'your_turn'], capabilities: ['complete', 'requests'] }]);
