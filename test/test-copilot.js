@@ -214,6 +214,9 @@ function testPendingRequestsSurviveParallelActivity() {
     const next = replay([...base, end, ev('assistant.turn_start')]);
     assert.strictEqual(next.status, STATUS.COOKING, `${end.type} clears waiting requests`);
   }
+  for (const type of [7, {}, ['permission.requested'], null]) {
+    assert.strictEqual(mapCopilotEvent({ type, data: { sessionId: 'par', requestId: 'x' } }, waiting), null, `type ${JSON.stringify(type)} is ignored`);
+  }
   const normalized = normalizeSession(waiting, { now: waiting.updated_at });
   assert.ok(!('_pendingRequests' in normalized), 'bookkeeping is not written to the state dir');
 }

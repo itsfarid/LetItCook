@@ -54,7 +54,7 @@ function nextPendingRequests(event, data, previous, reason) {
 }
 
 export function mapCopilotEvent(event, previousState = null) {
-  if (!event || !event.type) return null;
+  if (!event || typeof event.type !== 'string' || !event.type) return null;
 
   const data = event.data || {};
   const timestamp = event.timestamp ? new Date(event.timestamp).getTime() : Date.now();
