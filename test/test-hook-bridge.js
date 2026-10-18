@@ -7,7 +7,7 @@ import { spawn } from 'node:child_process';
 import { pathToFileURL } from 'node:url';
 import {
   readBoundedStdin, parseHookInput, findAgentPid, acquireLock, readStateFile,
-  stateFileName, applySignals, runHook,
+  stateFileName, applySignals, runHook, writeStateFile,
 } from '../src/hooks/bridge.js';
 import { SIGNAL } from '../src/core/lifecycle.js';
 import { STATUS } from '../src/core/status.js';
@@ -86,6 +86,23 @@ function testContendedUpdateIsSkipped() {
     assert.deepStrictEqual(written, [], 'no update without the lock');
     assert.strictEqual(fs.readFileSync(file, 'utf8'), before, 'the file is untouched');
     assert.ok(fs.existsSync(lock), "another hook's lock is not removed");
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+}
+
+function testFailedWriteLeavesNoTemporaryFile() {
+  const { root, dir } = tmpStateDir();
+  try {
+    fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+    const file = path.join(dir, 'claude_s1.json');
+    fs.writeFileSync(file, '{"old":true}');
+    for (const failing of ['writeFileSync', 'renameSync']) {
+      const fake = { ...fs, [failing]: () => { throw Object.assign(new Error('ENOSPC'), { code: 'ENOSPC' }); } };
+      assert.throws(() => writeStateFile(dir, file, { a: 1 }, fake), /ENOSPC/);
+      assert.deepStrictEqual(fs.readdirSync(dir), ['claude_s1.json'], `${failing} failure leaves no temporary file`);
+      assert.strictEqual(fs.readFileSync(file, 'utf8'), '{"old":true}', 'the previous state is kept');
+    }
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
@@ -208,6 +225,7 @@ async function run() {
   testFindAgentPid();
   testLocking();
   testContendedUpdateIsSkipped();
+  testFailedWriteLeavesNoTemporaryFile();
   testReadStateFileSafety();
   testApplySignalsWritesReadableState();
   testUntrustedStateDirIsRefused();
