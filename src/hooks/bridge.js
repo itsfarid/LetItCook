@@ -132,10 +132,26 @@ export function readStateFile(filePath, expected) {
   }
 }
 
-function writeStateFile(dir, filePath, record) {
+// Atomic replace. A failed write or rename removes its temporary file, so failures (a full
+// disk) cannot accumulate hidden files; the previous state file stays as it was.
+export function writeStateFile(dir, filePath, record, fsImpl = fs) {
   const tmpPath = path.join(dir, `.${path.basename(filePath)}.${process.pid}.${Date.now()}.tmp`);
-  fs.writeFileSync(tmpPath, JSON.stringify(record, null, 2), { encoding: 'utf8', mode: 0o600, flag: 'wx' });
-  fs.renameSync(tmpPath, filePath);
+  let created = false;
+  try {
+    const fd = fsImpl.openSync(tmpPath, 'wx', 0o600);
+    created = true;
+    try {
+      fsImpl.writeFileSync(fd, JSON.stringify(record, null, 2), 'utf8');
+    } finally {
+      fsImpl.closeSync(fd);
+    }
+    fsImpl.renameSync(tmpPath, filePath);
+  } catch (error) {
+    if (created) {
+      try { fsImpl.unlinkSync(tmpPath); } catch {}
+    }
+    throw error;
+  }
 }
 
 export function stateFileName(agent, sessionId) {
