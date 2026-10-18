@@ -264,7 +264,7 @@ export function runConformance(spec) {
     }
   }
 
-  return { id: spec.id, notApplicable };
+  return { id: spec.id, notApplicable: [...new Set(notApplicable)] };
 }
 
 export default { runConformance, SECRET };
