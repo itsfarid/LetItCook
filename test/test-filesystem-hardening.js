@@ -5,6 +5,7 @@ import os from 'node:os';
 import { STATUS } from '../src/core/status.js';
 import { isValidSessionId, ensurePrivateDir } from '../src/core/fs-safe.js';
 import {
+  getSessionDir,
   writeSessionFile,
   deleteSessionFile,
   readAllSessionsFromDir,
@@ -248,11 +249,11 @@ function loadReadSessions(target) {
   const meta = {};
   for (const s of Object.values(STATUS)) meta[s] = { priority: 0 };
   const factory = new Function(
-    'Gio', 'GLib', 'STATUS', 'STATUS_META', 'STALE_TIMEOUT_MS', 'console', 'log',
+    'Gio', 'GLib', 'STATUS', 'STATUS_META', 'STALE_TIMEOUT_MS', 'DEAD_SESSION_RETENTION_MS', 'console', 'log',
     `return function _readSessions() {\n${match[1]}\n};`,
   );
   return (Gio, GLib) => ({
-    fn: factory(Gio, GLib, STATUS, meta, 5 * 60 * 1000, fakeConsole, fakeConsole.error),
+    fn: factory(Gio, GLib, STATUS, meta, 5 * 60 * 1000, 60 * 60 * 1000, fakeConsole, fakeConsole.error),
     logs,
   });
 }
@@ -357,6 +358,54 @@ function testExtensionStateDirPermissionsSource() {
   }
 }
 
+// Session files are documented as owner-only (0600); previously they inherited the
+// umask (0644 observed on a real install), relying solely on the 0700 directory.
+function testSessionFilesArePrivate() {
+  const root = mkTmp('fs-file-mode');
+  const oldUmask = process.umask(0o022);
+  try {
+    const target = path.join(root, 'letitcook', 'sessions');
+    writeSessionFile({ session_id: 'ses_mode', agent: 'opencode', status: STATUS.COOKING }, target);
+    assert.strictEqual(mode(path.join(target, 'ses_mode.json')), 0o600, 'OpenCode session file is 0600');
+    // Rewriting keeps it private.
+    writeSessionFile({ session_id: 'ses_mode', agent: 'opencode', status: STATUS.DONE }, target);
+    assert.strictEqual(mode(path.join(target, 'ses_mode.json')), 0o600, 'rewritten session file stays 0600');
+
+    const copilotDir = path.join(root, 'copilot');
+    const sdir = path.join(copilotDir, 'session-state', 'cp-mode');
+    fs.mkdirSync(sdir, { recursive: true });
+    fs.writeFileSync(path.join(sdir, 'workspace.yaml'), 'id: cp-mode\n');
+    fs.writeFileSync(path.join(sdir, 'events.jsonl'), JSON.stringify({ type: 'session.start', data: { sessionId: 'cp-mode' }, timestamp: new Date().toISOString() }) + '\n');
+    new CopilotAdapter().syncToStateDir(target, { copilotDir });
+    assert.strictEqual(mode(path.join(target, 'copilot_cp-mode.json')), 0o600, 'Copilot synced file is 0600');
+  } finally {
+    process.umask(oldUmask);
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+}
+
+// The GNOME extension reads GLib.get_user_state_dir() (which honours XDG_STATE_HOME)
+// and notify.js honours it too, so writers must resolve the same sessions directory.
+function testSessionDirFollowsXdgStateHome() {
+  const saved = { xdg: process.env.XDG_STATE_HOME, dir: process.env.LETITCOOK_STATE_DIR };
+  try {
+    delete process.env.LETITCOOK_STATE_DIR;
+    delete process.env.XDG_STATE_HOME;
+    assert.strictEqual(getSessionDir(), path.join(os.homedir(), '.local', 'state', 'letitcook', 'sessions'));
+    process.env.XDG_STATE_HOME = '/custom/state';
+    assert.strictEqual(getSessionDir(), path.join('/custom/state', 'letitcook', 'sessions'));
+    process.env.XDG_STATE_HOME = 'relative/state';
+    assert.strictEqual(getSessionDir(), path.join(os.homedir(), '.local', 'state', 'letitcook', 'sessions'), 'relative XDG path ignored');
+    process.env.LETITCOOK_STATE_DIR = '/explicit/sessions';
+    assert.strictEqual(getSessionDir(), '/explicit/sessions', 'explicit override wins');
+    assert.strictEqual(getSessionDir('/arg'), '/arg', 'argument wins');
+  } finally {
+    for (const [k, v] of [['XDG_STATE_HOME', saved.xdg], ['LETITCOOK_STATE_DIR', saved.dir]]) {
+      if (v === undefined) delete process.env[k]; else process.env[k] = v;
+    }
+  }
+}
+
 function run() {
   testSessionIdValidator();
   testOpenCodeRejectsTraversal();
@@ -364,6 +413,8 @@ function run() {
   testCopilotRejectsTraversal();
   testPrivateDirectoryPermissions();
   testCopilotSyncCreatesPrivateDir();
+  testSessionFilesArePrivate();
+  testSessionDirFollowsXdgStateHome();
   testExtensionEnumeratorCleanup();
   testExtensionStateDirPermissionsSource();
   console.log('All LetItCook filesystem hardening tests passed.');

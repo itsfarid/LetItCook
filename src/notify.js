@@ -10,17 +10,23 @@ import {
 } from './core/notification.js';
 import { STATUS } from './core/status.js';
 
+// notify-send only accepts these levels; the payload's logical 'high' (Your Turn) is
+// sent as 'normal', matching the extension's Main.notify default urgency.
+const NOTIFY_SEND_URGENCIES = new Set(['low', 'normal', 'critical']);
+
 export function sendDesktopNotification(title, body, urgency = 'normal') {
+  const level = NOTIFY_SEND_URGENCIES.has(urgency) ? urgency : 'normal';
   try {
-    execFileSync('notify-send', [title, body, '-u', urgency], { stdio: 'ignore' });
+    execFileSync('notify-send', [title, body, '-u', level], { stdio: 'ignore' });
     return true;
   } catch {
     return false;
   }
 }
 
-function getCachePath() {
-  const base = process.env.XDG_STATE_HOME || path.join(os.homedir(), '.local', 'state');
+export function getCachePath() {
+  const xdgState = process.env.XDG_STATE_HOME;
+  const base = xdgState && path.isAbsolute(xdgState) ? xdgState : path.join(os.homedir(), '.local', 'state');
   return path.join(base, 'letitcook', 'notify_cache.json');
 }
 
