@@ -233,6 +233,31 @@ function testCapabilities() {
   }
 }
 
+// A request delivered after its turn ended, but sent before that, is late: it cannot turn
+// the finished turn back into Your Turn (Devin review on PR #7).
+function testLateRequestsAfterTheTurnEnded() {
+  for (const ending of [SIGNAL.TURN_COMPLETE, SIGNAL.FAILURE, SIGNAL.TURN_END, SIGNAL.CANCEL]) {
+    const finished = run([
+      { type: SIGNAL.TURN_START, turnId: 't1', at: 100 },
+      { type: ending, turnId: 't1', at: 300 },
+    ]).state;
+    for (const turnId of ['t1', undefined]) {
+      const late = run([{ type: SIGNAL.REQUEST_OPEN, turnId, requestId: 'r1', at: 200 }], finished).state;
+      assert.deepStrictEqual([late.status, late.reason], [finished.status, finished.reason], `${ending}: a request older than the end is ignored`);
+    }
+    // Requests sent after the end, and requests of a new turn, still show.
+    assert.strictEqual(run([{ type: SIGNAL.REQUEST_OPEN, turnId: 't1', requestId: 'r2', at: 400 }], finished).state.status, STATUS.YOUR_TURN);
+    const next = run([
+      { type: SIGNAL.TURN_START, turnId: 't2', at: 500 },
+      { type: SIGNAL.REQUEST_OPEN, turnId: 't2', requestId: 'r3', at: 450 },
+    ], finished).state;
+    assert.strictEqual(next.status, STATUS.YOUR_TURN, `${ending}: the new turn's requests are not compared with the old end`);
+    assert.strictEqual(next.lifecycle.endedAt, undefined);
+  }
+  // Without producer times (native adapters) nothing changes.
+  assert.strictEqual(run([{ type: SIGNAL.TURN_START }, { type: SIGNAL.TURN_COMPLETE }, { type: SIGNAL.REQUEST_OPEN, requestId: 'r' }]).state.status, STATUS.YOUR_TURN);
+}
+
 // Request ids are producer data: inherited object member names must be ordinary keys
 // (Devin review on PR #7).
 function testPrototypeSensitiveRequestIds() {
@@ -302,6 +327,7 @@ function run_() {
   testEventOrderingMetadata();
   testCapabilities();
   testPrototypeSensitiveRequestIds();
+  testLateRequestsAfterTheTurnEnded();
   testSubagentsNeverSettleTheParent();
   testSessionEndNeverCompletes();
   testSessionsAreIsolated();

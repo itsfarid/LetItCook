@@ -167,6 +167,8 @@ export function reduceSession(prev, signal, context = {}) {
   const seen = Array.isArray(lifecycle.seen) ? lifecycle.seen.slice(-MAX_SEEN) : [];
   let turn = typeof lifecycle.turn === 'string' ? lifecycle.turn : undefined;
   let turnAt = Number.isSafeInteger(lifecycle.turnAt) ? lifecycle.turnAt : undefined;
+  // When the current turn ended (producer time), until the next turn starts.
+  let endedAt = Number.isSafeInteger(lifecycle.endedAt) ? lifecycle.endedAt : undefined;
   let status = prev ? prev.status : null;
   let reason = prev ? prev.reason : '';
   const settled = status === STATUS.DONE || status === STATUS.BURN;
@@ -178,12 +180,20 @@ export function reduceSession(prev, signal, context = {}) {
   // Ordering (only for signals that carry ids or times):
   // - an event id already applied is a duplicate;
   // - a turn-ending event or a request for another turn than the current one is late;
-  // - a turn start or end older than the last applied one is late.
+  // - a turn start or end older than the last applied one is late;
+  // - a request from before the current turn ended is late: the ended turn cannot be
+  //   waiting for it.
   if (s.eventId && seen.includes(s.eventId)) return null;
   if (s.turnId && turn && s.turnId !== turn && (TURN_ENDING.includes(type) || type === SIGNAL.REQUEST_OPEN)) return null;
   if (turnLevel && s.at && turnAt && s.at < turnAt) return null;
+  if (type === SIGNAL.REQUEST_OPEN && s.at && endedAt && s.at < endedAt) return null;
   if (turnLevel) {
-    if (type === SIGNAL.TURN_START) turn = s.turnId;
+    if (type === SIGNAL.TURN_START) {
+      turn = s.turnId;
+      endedAt = undefined;
+    } else if (s.at) {
+      endedAt = s.at;
+    }
     if (s.at) turnAt = s.at;
   }
 
@@ -272,6 +282,7 @@ export function reduceSession(prev, signal, context = {}) {
   else if (seen.length) record.lifecycle.seen = seen;
   if (turn) record.lifecycle.turn = turn;
   if (turnAt) record.lifecycle.turnAt = turnAt;
+  if (endedAt) record.lifecycle.endedAt = endedAt;
   if (capabilities) record.capabilities = capabilities;
   const parent = s.parentSessionId || (prev && prev.parent_session_id);
   if (parent) record.parent_session_id = parent;
