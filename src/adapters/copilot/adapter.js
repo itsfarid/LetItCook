@@ -33,8 +33,28 @@ export function parseWorkspaceYaml(content) {
   return result;
 }
 
+const REQUEST_OPENED = new Set(['permission.requested', 'user_input.requested', 'elicitation.requested']);
+const REQUEST_RESOLVED = new Set(['permission.completed', 'user_input.completed', 'elicitation.completed']);
+const TURN_SETTLED = new Set(['assistant.turn_end', 'session.task_complete', 'session.error', 'abort', 'session.shutdown']);
+
+// Requests (permission, input, elicitation) still waiting for the user, keyed by request
+// id. Copilot runs tools in parallel, so activity of another tool must not hide one;
+// resolving one request keeps the others. The turn settling clears them all.
+function nextPendingRequests(event, data, previous, reason) {
+  if (TURN_SETTLED.has(event.type)) return {};
+  const pending = { ...(previous || {}) };
+  const key = typeof data.requestId === 'string' && data.requestId ? data.requestId : event.type.split('.')[0];
+  if (REQUEST_OPENED.has(event.type)) {
+    pending[key] = reason;
+  } else if (REQUEST_RESOLVED.has(event.type)) {
+    if (typeof data.requestId === 'string' && data.requestId) delete pending[key];
+    else return {};
+  }
+  return pending;
+}
+
 export function mapCopilotEvent(event, previousState = null) {
-  if (!event || !event.type) return null;
+  if (!event || typeof event.type !== 'string' || !event.type) return null;
 
   const data = event.data || {};
   const timestamp = event.timestamp ? new Date(event.timestamp).getTime() : Date.now();
@@ -214,6 +234,13 @@ export function mapCopilotEvent(event, previousState = null) {
     }
   }
 
+  const pendingRequests = nextPendingRequests(event, data, previousState?._pendingRequests, reason);
+  const pendingIds = Object.keys(pendingRequests);
+  if (pendingIds.length > 0 && status === STATUS.COOKING) {
+    status = STATUS.YOUR_TURN;
+    reason = pendingRequests[pendingIds[pendingIds.length - 1]];
+  }
+
   return {
     session_id: sessionId,
     agent: 'copilot',
@@ -227,6 +254,7 @@ export function mapCopilotEvent(event, previousState = null) {
     terminated,
     deleted,
     confidence: isValidStatus(status) && status !== STATUS.UNKNOWN ? 'high' : 'medium',
+    _pendingRequests: pendingRequests,
   };
 }
 
@@ -390,14 +418,17 @@ export class CopilotAdapter extends BaseAdapter {
 
     // Freshness policy: only sync sessions worth glancing at.
     // - stale sessions (too old to trust) are never written
-    // - settled sessions (Done/Burn/Unknown) older than maxAgeMs are skipped
-    //   so months-old history does not clog the panel menu forever
+    // - sessions other than Cooking whose last event is older than maxAgeMs are
+    //   skipped so months-old history does not clog the panel menu forever. This
+    //   includes Your Turn: Copilot ends every turn with Your Turn and records no
+    //   process id, so a session closed without `session.shutdown` (for example a
+    //   killed terminal) would otherwise stay Your Turn indefinitely.
     const now = options.now || Date.now();
     const maxAgeMs = options.maxAgeMs || 60 * 60 * 1000;
     const live = sessions.filter(s => {
       if (!isValidSessionId(s.session_id)) return false;
       if (s.stale) return false;
-      if (s.status !== STATUS.COOKING && s.status !== STATUS.YOUR_TURN) {
+      if (s.status !== STATUS.COOKING) {
         return (now - s.updated_at) <= maxAgeMs;
       }
       return true;

@@ -2,7 +2,7 @@ import assert from 'node:assert';
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
-import { STATUS } from '../src/core/status.js';
+import { STATUS, normalizeSession } from '../src/core/status.js';
 import {
   parseWorkspaceYaml,
   mapCopilotEvent,
@@ -183,6 +183,44 @@ function testCopilotEventMapping() {
   assert.strictEqual(evShutdownErr.status, STATUS.BURN);
 }
 
+// Copilot runs tools in parallel: activity of another tool must not hide a permission
+// request, and resolving one of two requests keeps the other.
+function testPendingRequestsSurviveParallelActivity() {
+  const ev = (type, data = {}) => ({ type, data: { sessionId: 'par', ...data }, timestamp: new Date().toISOString() });
+  const replay = (events) => events.reduce((state, e) => mapCopilotEvent(e, state) || state, null);
+  const base = [
+    ev('assistant.turn_start'),
+    ev('permission.requested', { requestId: 'p1', permissionRequest: { kind: 'shell' } }),
+    ev('tool.execution_start', { toolCallId: 't2', toolName: 'view' }),
+    ev('tool.execution_progress', { toolCallId: 't2' }),
+    ev('tool.execution_complete', { toolCallId: 't2', toolName: 'view' }),
+  ];
+  const waiting = replay(base);
+  assert.strictEqual(waiting.status, STATUS.YOUR_TURN, 'parallel tool activity keeps the permission visible');
+  assert.strictEqual(waiting.reason, 'permission:shell');
+
+  const two = replay([...base, ev('permission.requested', { requestId: 'p2', permissionRequest: { kind: 'write' } }),
+    ev('permission.completed', { requestId: 'p2', result: { kind: 'approved' } })]);
+  assert.strictEqual(two.status, STATUS.YOUR_TURN, 'resolving one request keeps the other');
+  assert.strictEqual(two.reason, 'permission:shell');
+
+  const resolved = replay([...base, ev('permission.completed', { requestId: 'p1', result: { kind: 'approved' } })]);
+  assert.strictEqual(resolved.status, STATUS.COOKING, 'resolving the last request returns to Cooking');
+
+  const legacy = replay([...base, ev('permission.completed', {})]);
+  assert.strictEqual(legacy.status, STATUS.COOKING, 'a resolution without request id clears all');
+
+  for (const end of [ev('assistant.turn_end'), ev('abort', { reason: 'user initiated' }), ev('session.error', { errorType: 'quota' })]) {
+    const next = replay([...base, end, ev('assistant.turn_start')]);
+    assert.strictEqual(next.status, STATUS.COOKING, `${end.type} clears waiting requests`);
+  }
+  for (const type of [7, {}, ['permission.requested'], null]) {
+    assert.strictEqual(mapCopilotEvent({ type, data: { sessionId: 'par', requestId: 'x' } }, waiting), null, `type ${JSON.stringify(type)} is ignored`);
+  }
+  const normalized = normalizeSession(waiting, { now: waiting.updated_at });
+  assert.ok(!('_pendingRequests' in normalized), 'bookkeeping is not written to the state dir');
+}
+
 function testCopilotDirectoryReadingAndSync() {
   const tmpCopilot = path.join(os.tmpdir(), `letitcook_copilot_test_${Date.now()}`);
   const tmpLetItCook = path.join(os.tmpdir(), `letitcook_state_test_${Date.now()}`);
@@ -295,6 +333,10 @@ function testCopilotSyncFreshness() {
       { type: 'session.task_complete', data: { success: true, summary: 'old' } });
     // Stale Cooking (10 min, default staleMs 5min) -> skipped
     mkSession('stale_cooking', 10 * 60 * 1000, null);
+    // Your Turn waiting 10 min -> still synced as Your Turn (not stale)
+    mkSession('waiting_turn_end', 10 * 60 * 1000, { type: 'assistant.turn_end', data: {} });
+    // Your Turn left 3h ago (no shutdown, e.g. killed terminal) -> skipped
+    mkSession('ancient_turn_end', 3 * 60 * 60 * 1000, { type: 'assistant.turn_end', data: {} });
 
     const adapter = new CopilotAdapter();
     const synced = adapter.syncToStateDir(tmpState, { copilotDir: tmpCopilot, now });
@@ -302,6 +344,9 @@ function testCopilotSyncFreshness() {
     assert.ok(ids.includes('recent_done'), 'recent Done is synced');
     assert.ok(!ids.includes('ancient_done'), 'ancient Done is skipped');
     assert.ok(!ids.includes('stale_cooking'), 'stale Cooking is skipped');
+    assert.strictEqual(synced.find(s => s.session_id === 'waiting_turn_end')?.status, STATUS.YOUR_TURN,
+      'a waiting Your Turn is synced as Your Turn');
+    assert.ok(!ids.includes('ancient_turn_end'), 'Your Turn older than maxAgeMs is skipped');
     assert.ok(fs.existsSync(path.join(tmpState, 'copilot_recent_done.json')));
     assert.ok(!fs.existsSync(path.join(tmpState, 'copilot_ancient_done.json')));
   } finally {
@@ -355,7 +400,9 @@ function testReplayCacheTracksChanges() {
 
     // Staleness still follows the clock on cached sessions.
     const later = adapter.detectSessions({ copilotDir: root, now: Date.now() + 10 * 60 * 1000 });
-    assert.ok(later.every(x => x.status === STATUS.UNKNOWN && x.stale), 'cached sessions still go stale over time');
+    const byId = Object.fromEntries(later.map(x => [x.session_id, x]));
+    assert.ok(byId['cache-c'].status === STATUS.UNKNOWN && byId['cache-c'].stale, 'cached Cooking sessions still go stale over time');
+    assert.ok(byId['cache-a'].status === STATUS.YOUR_TURN && !byId['cache-a'].stale, 'a cached Your Turn does not time out');
   } finally {
     fs.readFileSync = originalRead;
     fs.rmSync(root, { recursive: true, force: true });
@@ -365,6 +412,7 @@ function testReplayCacheTracksChanges() {
 function run() {
   testYamlParser();
   testCopilotEventMapping();
+  testPendingRequestsSurviveParallelActivity();
   testCopilotDirectoryReadingAndSync();
   testCopilotSyncFreshness();
   testReplayCacheTracksChanges();
