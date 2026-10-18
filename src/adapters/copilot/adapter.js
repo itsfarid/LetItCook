@@ -374,7 +374,7 @@ export class CopilotAdapter extends BaseAdapter {
       const tmpPath = path.join(targetStateDir, `.${fileName}.${process.pid}.${Date.now()}.tmp`);
 
       // ponytail: atomic rename on POSIX, upgrade to lockfile if cross-device issues occur
-      fs.writeFileSync(tmpPath, JSON.stringify(session, null, 2), 'utf8');
+      fs.writeFileSync(tmpPath, JSON.stringify(session, null, 2), { encoding: 'utf8', mode: 0o600 });
       fs.renameSync(tmpPath, filePath);
     }
 

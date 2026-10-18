@@ -3,7 +3,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import { execFileSync } from 'node:child_process';
-import { STATUS, STATUS_META } from '../src/core/status.js';
+import { STATUS, STATUS_META, normalizeSession } from '../src/core/status.js';
+import { NotificationTracker, shortCwd } from '../src/core/notification.js';
 
 function testModernMetadataCompatibility() {
   const metadataPath = path.resolve('extension/metadata.json');
@@ -341,6 +342,152 @@ function testPackagingBothTargets() {
   }
 }
 
+// --- Behavioural parity: execute the real extension methods -------------------
+// GJS modules cannot load under Node, so method bodies are extracted from each
+// extension variant and run against fakes, then compared with the Node reference
+// implementations (normalizeSession / NotificationTracker) used by the test suite.
+const EXTENSION_TARGETS = ['extension', 'extension-legacy'];
+
+function extractMethod(code, name, target) {
+  const match = code.match(new RegExp(`\\n    ${name}\\((\\w*)\\) \\{\\n([\\s\\S]*?)\\n    \\}\\n`));
+  assert.ok(match, `${target}: ${name} not found`);
+  return { param: match[1], body: match[2] };
+}
+
+function extractConst(code, name, target) {
+  const match = code.match(new RegExp(`\\nconst ${name} = ([^;]+);`));
+  assert.ok(match, `${target}: const ${name} not found`);
+  return new Function('STATUS', `return (${match[1]});`)(STATUS);
+}
+
+function loadExtensionMethod(target, name, deps) {
+  const code = fs.readFileSync(path.resolve(`${target}/extension.js`), 'utf8');
+  const { param, body } = extractMethod(code, name, target);
+  const consts = {
+    STATUS,
+    STATUS_META: extractConst(code, 'STATUS_META', target),
+    STALE_TIMEOUT_MS: extractConst(code, 'STALE_TIMEOUT_MS', target),
+  };
+  const retention = code.match(/\nconst DEAD_SESSION_RETENTION_MS = ([^;]+);/);
+  if (retention) consts.DEAD_SESSION_RETENTION_MS = new Function(`return (${retention[1]});`)();
+  const all = { ...consts, console: { error() {} }, log() {}, ...deps };
+  const names = Object.keys(all);
+  return new Function(...names, `return function ${name}(${param}) {\n${body}\n};`)(...names.map(n => all[n]));
+}
+
+function runExtensionReadSession(target, raw, pidAlive) {
+  const Gio = {
+    FileQueryInfoFlags: { NONE: 0 },
+    File: {
+      new_for_path: () => ({
+        enumerate_children: () => {
+          let done = false;
+          return {
+            next_file: () => (done ? null : (done = true, { get_name: () => 'ses_x.json' })),
+            close() {},
+          };
+        },
+        load_contents: () => [true, new TextEncoder().encode(JSON.stringify(raw))],
+      }),
+    },
+  };
+  const GLib = {
+    build_filenamev: parts => parts.join('/'),
+    file_test: () => pidAlive,
+    FileTest: { EXISTS: 1 },
+  };
+  const fn = loadExtensionMethod(target, '_readSessions', { Gio, GLib });
+  const result = fn.call({ _stateDir: '/fake' });
+  assert.strictEqual(result.length, 1);
+  return result[0];
+}
+
+function testExtensionLifecycleParityWithNode() {
+  const now = Date.now();
+  const ages = [10 * 1000, 10 * 60 * 1000, 2 * 60 * 60 * 1000];
+  for (const target of EXTENSION_TARGETS) {
+    for (const status of Object.values(STATUS)) {
+      for (const pidAlive of [true, false]) {
+        for (const age of ages) {
+          const raw = { session_id: 'ses_x', agent: 'opencode', status, pid: 4242, updated_at: now - age };
+          const ext = runExtensionReadSession(target, raw, pidAlive);
+          const ref = normalizeSession(raw, { now, isPidAlive: () => pidAlive });
+          const label = `${target}: ${status} pidAlive=${pidAlive} age=${age}`;
+          assert.strictEqual(ext.status, ref.status, `${label}: status`);
+          assert.strictEqual(ext.stale, ref.stale, `${label}: stale`);
+          assert.strictEqual(ext.terminated, ref.terminated, `${label}: terminated`);
+          assert.notStrictEqual(ext.status === STATUS.DONE && status !== STATUS.DONE, true, `${label}: never invents Done`);
+        }
+      }
+    }
+  }
+}
+
+function makeExtensionNotifier(target, notifyDone) {
+  const notified = [];
+  const Main = { notify: (title, body) => notified.push({ title, body }) };
+  const fn = loadExtensionMethod(target, '_checkNotifications', { Main, shortCwd });
+  const self = {
+    _notifyCache: { _config: { notifyDone }, sessions: {} },
+    _notifyDone: notifyDone,
+    _isFirstScan: true,
+    _saveNotifyCache() {},
+  };
+  return {
+    scan(sessions) {
+      const before = notified.length;
+      fn.call(self, sessions);
+      return notified.slice(before);
+    },
+  };
+}
+
+function testExtensionNotificationParityWithTracker() {
+  const s = (session_id, status, extra = {}) => ({ session_id, agent: 'opencode', status, title: 'T', cwd: '', reason: '', ...extra });
+  const scenarios = [
+    // [notifyDone, steps]
+    [false, [
+      [s('a', STATUS.YOUR_TURN)],                 // first scan: suppressed
+      [s('a', STATUS.COOKING)],
+      [s('a', STATUS.YOUR_TURN)],                 // notify
+      [s('a', STATUS.YOUR_TURN)],                 // dedup
+      [s('a', STATUS.COOKING)],
+      [s('a', STATUS.YOUR_TURN)],                 // genuine repeat: notify
+      [s('a', STATUS.BURN)],                      // notify
+      [s('a', STATUS.COOKING), s('b', STATUS.COOKING)],
+      [s('a', STATUS.DONE), s('b', STATUS.BURN)], // Done opted out; b notifies
+    ]],
+    [true, [
+      [s('a', STATUS.COOKING), s('b', STATUS.UNKNOWN)],
+      [s('a', STATUS.DONE), s('b', STATUS.DONE)], // a: Cooking->Done notifies; b: Unknown->Done never
+      [s('a', STATUS.DONE), s('b', STATUS.DONE)],
+      [s('a', STATUS.COOKING)],
+      [s('a', STATUS.DONE)],                      // subsequent completion notifies again
+      [s('a', STATUS.YOUR_TURN)],
+      [s('a', STATUS.DONE)],                      // Your Turn -> Done is untrustworthy
+      [s('a', STATUS.COOKING)],
+      [s('a', STATUS.YOUR_TURN, { stale: true })],
+      [s('a', STATUS.BURN, { confidence: 'low' })],
+    ]],
+  ];
+
+  for (const target of EXTENSION_TARGETS) {
+    for (const [notifyDone, steps] of scenarios) {
+      const ext = makeExtensionNotifier(target, notifyDone);
+      const ref = new NotificationTracker({ notifyDone });
+      steps.forEach((sessions, i) => {
+        const got = ext.scan(sessions);
+        const want = ref.processSessions(sessions);
+        assert.strictEqual(got.length, want.length, `${target} notifyDone=${notifyDone} step ${i}: notification count`);
+        want.forEach((w, j) => {
+          assert.strictEqual(got[j].title, w.title, `${target} step ${i}: title`);
+          assert.ok(got[j].body.startsWith(w.body.split(' ')[0]), `${target} step ${i}: body status prefix`);
+        });
+      });
+    }
+  }
+}
+
 function run() {
   testModernMetadataCompatibility();
   testLegacyMetadataCompatibility();
@@ -354,6 +501,8 @@ function run() {
   testStylesheetSingleDotDesign();
   testNotificationIntegrationParity();
   testPackagingBothTargets();
+  testExtensionLifecycleParityWithNode();
+  testExtensionNotificationParityWithTracker();
   console.log('All LetItCook GNOME extension compatibility tests passed.');
 }
 

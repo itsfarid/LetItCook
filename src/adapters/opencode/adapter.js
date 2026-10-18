@@ -10,7 +10,10 @@ let writeCounter = 0;
 export function getSessionDir(overrideDir) {
   if (overrideDir) return overrideDir;
   if (process.env.LETITCOOK_STATE_DIR) return process.env.LETITCOOK_STATE_DIR;
-  return path.join(os.homedir(), '.local', 'state', 'letitcook', 'sessions');
+  // Match GLib.get_user_state_dir() used by the GNOME extension.
+  const xdgState = process.env.XDG_STATE_HOME;
+  const stateHome = xdgState && path.isAbsolute(xdgState) ? xdgState : path.join(os.homedir(), '.local', 'state');
+  return path.join(stateHome, 'letitcook', 'sessions');
 }
 
 export function getWriteCount() {
@@ -34,8 +37,39 @@ export function hasMeaningfulStateChange(prev, next) {
     Boolean(prev.deleted) !== Boolean(next.deleted) ||
     prev._completionCandidate !== next._completionCandidate ||
     prev._lastUserMessageId !== next._lastUserMessageId ||
-    JSON.stringify(prev._toolMessageIds || []) !== JSON.stringify(next._toolMessageIds || [])
+    JSON.stringify(prev._toolMessageIds || []) !== JSON.stringify(next._toolMessageIds || []) ||
+    JSON.stringify(prev._pendingRequests || {}) !== JSON.stringify(next._pendingRequests || {})
   );
+}
+
+const REQUEST_ASKED = new Set(['permission.asked', 'permission.v2.asked', 'question.asked', 'question.v2.asked']);
+const REQUEST_ANSWERED = new Set([
+  'permission.replied', 'permission.v2.replied',
+  'question.replied', 'question.v2.replied', 'question.rejected', 'question.v2.rejected',
+]);
+
+function isIdleStatusEvent(event, p) {
+  return event.type === 'session.status' && String((p.status || {}).type || p.status || '').toLowerCase() === 'idle';
+}
+
+// Permission/question requests still awaiting the user, keyed by request id. Answering
+// one of several parallel requests must not hide the others. The agent loop ending
+// (idle or error) clears them so a missed reply can never pin Your Turn.
+function nextPendingRequests(event, p, previous, reason) {
+  if (event.type === 'session.idle' || event.type === 'session.error' || isIdleStatusEvent(event, p)) return {};
+  const pending = { ...(previous || {}) };
+  if (REQUEST_ASKED.has(event.type) && typeof p.id === 'string' && p.id) {
+    pending[p.id] = reason;
+  } else if (REQUEST_ANSWERED.has(event.type) && typeof p.requestID === 'string') {
+    delete pending[p.requestID];
+  }
+  return pending;
+}
+
+function applyPendingRequests(status, reason, pending) {
+  const ids = Object.keys(pending);
+  if (ids.length === 0 || status !== STATUS.COOKING) return { status, reason };
+  return { status: STATUS.YOUR_TURN, reason: pending[ids[ids.length - 1]] };
 }
 
 export function extractSessionId(event) {
@@ -210,6 +244,9 @@ export function mapOpenCodeEvent(event, previousState = null) {
     }
   }
 
+  const pendingRequests = nextPendingRequests(event, p, previousState?._pendingRequests, reason);
+  ({ status, reason } = applyPendingRequests(status, reason, pendingRequests));
+
   const info = p.info || p;
   let lastUserMessageId = previousState?._lastUserMessageId;
   let toolMessageIds = previousState?._toolMessageIds || [];
@@ -237,7 +274,7 @@ export function mapOpenCodeEvent(event, previousState = null) {
       !info.error && info.summary !== true &&
       !toolMessageIds.includes(info.id) &&
       typeof lastUserMessageId === 'string' && info.parentID === lastUserMessageId;
-  } else if (event.type === 'session.status' && String((p.status || {}).type || p.status || '').toLowerCase() === 'idle') {
+  } else if (isIdleStatusEvent(event, p)) {
     completionCandidate = false;
   } else if (status === STATUS.DONE || status === STATUS.BURN || status === STATUS.YOUR_TURN) {
     completionCandidate = false;
@@ -258,6 +295,7 @@ export function mapOpenCodeEvent(event, previousState = null) {
     _lastUserMessageId: lastUserMessageId,
     _toolMessageIds: toolMessageIds,
     _completionCandidate: completionCandidate,
+    _pendingRequests: pendingRequests,
   };
 }
 
@@ -283,6 +321,9 @@ export function mapToolHook(stage, input, previousState = null) {
     reason = `tool:${tool}:completed`;
   }
 
+  const pendingRequests = previousState?._pendingRequests || {};
+  ({ status, reason } = applyPendingRequests(status, reason, pendingRequests));
+
   return {
     session_id: sessionId,
     agent: 'opencode',
@@ -296,6 +337,7 @@ export function mapToolHook(stage, input, previousState = null) {
     _lastUserMessageId: previousState?._lastUserMessageId,
     _toolMessageIds: previousState?._toolMessageIds || [],
     _completionCandidate: false,
+    _pendingRequests: pendingRequests,
   };
 }
 
@@ -308,9 +350,9 @@ export function writeSessionFile(session, baseDir) {
   const tmpPath = path.join(targetDir, `.${sessionId}.${process.pid}.${Date.now()}.tmp`);
 
   // Completion bookkeeping is process-local and must not leak into the normalized state file.
-  const { _lastUserMessageId, _toolMessageIds, _completionCandidate, ...persistedSession } = session;
+  const { _lastUserMessageId, _toolMessageIds, _completionCandidate, _pendingRequests, ...persistedSession } = session;
   // ponytail: atomic rename on POSIX, upgrade to lockfile if cross-device issues occur
-  fs.writeFileSync(tmpPath, JSON.stringify(persistedSession, null, 2), 'utf8');
+  fs.writeFileSync(tmpPath, JSON.stringify(persistedSession, null, 2), { encoding: 'utf8', mode: 0o600 });
   fs.renameSync(tmpPath, filePath);
   writeCounter++;
 }
