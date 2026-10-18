@@ -135,7 +135,8 @@ export function mapOpenCodeEvent(event, previousState = null) {
     case 'question.asked':
     case 'question.v2.asked': {
       status = STATUS.YOUR_TURN;
-      const perm = p.permission || p.action || p.question || p.header || 'permission requested';
+      const fallback = event.type.startsWith('question.') ? 'question' : 'permission requested';
+      const perm = p.permission || p.action || p.question || p.header || fallback;
       const pat = Array.isArray(p.patterns || p.resources) ? (p.patterns || p.resources).slice(0, 2).join(',') : '';
       reason = pat ? `${event.type}:${perm}:${pat}` : `${event.type}:${perm}`;
       break;
