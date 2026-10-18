@@ -4,7 +4,7 @@ import path from 'node:path';
 import os from 'node:os';
 import { execFileSync } from 'node:child_process';
 import { STATUS, STATUS_META, normalizeSession } from '../src/core/status.js';
-import { NotificationTracker, formatNotification } from '../src/core/notification.js';
+import { NotificationTracker, formatNotification, cleanNotificationText } from '../src/core/notification.js';
 
 function testModernMetadataCompatibility() {
   const metadataPath = path.resolve('extension/metadata.json');
@@ -376,10 +376,13 @@ function loadExtensionMethod(target, name, deps) {
 }
 
 // Top-level notification helpers of a variant (shortCwd uses the real home directory).
-const NOTIFICATION_HELPERS = ['shortCwd', 'cleanNotificationText', 'notificationReason', 'formatNotificationBody'];
+const NOTIFICATION_HELPERS = [
+  'shortCwd', 'notificationFirstLine', 'boundNotificationText', 'openQuote', 'redactNotificationSecrets',
+  'cleanNotificationText', 'notificationReason', 'formatNotificationBody',
+];
 function loadExtensionNotificationHelpers(target) {
   const code = fs.readFileSync(path.resolve(`${target}/extension.js`), 'utf8');
-  const consts = ['NOTIFY_SUBJECT_MAX', 'NOTIFY_REASON_MAX', 'SECRET_WORD', 'SECRET_ASSIGNMENT_RE', 'SECRET_FLAG_RE'].map((name) => {
+  const consts = ['NOTIFY_SUBJECT_MAX', 'NOTIFY_REASON_MAX', 'NOTIFY_INPUT_MAX', 'SECRET_KEY_RE'].map((name) => {
     const match = code.match(new RegExp(`\\nconst ${name} = [^\\n]+`));
     assert.ok(match, `${target}: const ${name} not found`);
     return match[0];
@@ -481,10 +484,12 @@ const SANITIZATION_CORPUS = [
   ['question', 'question.asked:permission requested'],
   ['plain', 'permission needed'],
   ['benign words', 'error:max tokens per minute: 5000; secret sauce is fine'],
+  ['prefixed key', 'error:error:token=hunter2tok:def and PGPASSWORD=hunter2pg'],
+  ['spaced key', 'error:password = hunter2spaced and cookie: hunter2cookie; Path=/'],
   ['empty', ''],
   ['non-string', 42],
 ];
-const SECRETS = ['sk-live', 'sk-proj', 'hunter2', 'two words', '/home/alice', 'clients/acme', 'SessionPrompt', 'bunfs', 'second line', 'v1/deploy', 'key=abc'];
+const SECRETS = ['sk-live', 'sk-proj', 'hunter2', 'hunter2tok', 'hunter2pg', 'hunter2spaced', 'hunter2cookie', 'two words', '/home/alice', 'clients/acme', 'SessionPrompt', 'bunfs', 'second line', 'v1/deploy', 'key=abc'];
 
 function testNotificationSanitizationParity() {
   for (const target of EXTENSION_TARGETS) {
@@ -516,6 +521,102 @@ function testNotificationSanitizationParity() {
   assert.strictEqual(benign.body, 'Burn: error:max tokens per minute: 5000; secret sauce is fine • Deploy', 'ordinary words are not redacted');
   const cwd = formatNotification({ agent: 'opencode', status: STATUS.DONE, cwd: '/srv/app' });
   assert.strictEqual(cwd.body, 'Done • /srv/app', 'project identifier is kept');
+}
+
+// R1: the sanitizer runs on GNOME Shell's main thread. Every implementation must only
+// ever process a bounded prefix, whatever the input length.
+function notificationImplementations() {
+  const node = {
+    body: session => formatNotification(session).body,
+    title: session => formatNotification(session).title,
+  };
+  const variants = EXTENSION_TARGETS.map((target) => {
+    const helpers = loadExtensionNotificationHelpers(target);
+    return [target, {
+      body: session => helpers.formatNotificationBody(session),
+      title: session => `LetItCook: ${helpers.cleanNotificationText(session.agent || 'Agent', 32) || 'Agent'}`,
+    }];
+  });
+  return [['node', node], ...variants];
+}
+
+const PATHOLOGICAL_LINES = {
+  'word characters': 'a'.repeat(100000),
+  'dash-separated': '-ab'.repeat(34000),
+  'provider JSON body': JSON.stringify({ error: { message: 'x'.repeat(100000) } }),
+  'path segments': '/abc'.repeat(25000),
+  'dotted host': 'a.'.repeat(50000),
+  'colons': 'token:'.repeat(17000),
+  'equals': 'key='.repeat(25000),
+  'ANSI codes': '\u001b[0m'.repeat(25000),
+  'open quotes': 'password="x '.repeat(9000),
+  'many words': 'ordinary word '.repeat(7200),
+};
+
+function testNotificationSanitizerIsBounded() {
+  for (const [impl, format] of notificationImplementations()) {
+    for (const [label, line] of Object.entries(PATHOLOGICAL_LINES)) {
+      for (const status of [STATUS.BURN, STATUS.YOUR_TURN]) {
+        const session = { agent: line, status, reason: `error:${line}`, title: line };
+        // Deterministic check: nothing past the bound can influence the output.
+        const short = { agent: line.slice(0, 600), status, reason: `error:${line}`.slice(0, 600), title: line.slice(0, 600) };
+        assert.strictEqual(format.body(session), format.body(short), `${impl} ${label} ${status}: output depends only on the bounded prefix`);
+        assert.strictEqual(format.title(session), format.title(short), `${impl} ${label}: title bounded`);
+        // Timing check with a generous threshold (unbounded input took 32 s at 100 KB).
+        let best = Infinity;
+        for (let i = 0; i < 3; i++) {
+          const started = process.hrtime.bigint();
+          format.body(session);
+          format.title(session);
+          best = Math.min(best, Number(process.hrtime.bigint() - started) / 1e6);
+        }
+        assert.ok(best < 50, `${impl} ${label} ${status}: 100 KB line formatted in ${best.toFixed(1)} ms (limit 50 ms)`);
+      }
+    }
+  }
+}
+
+// A secret straddling the input cutoff must not be partly shown. The line is cut at the
+// last whitespace before NOTIFY_INPUT_MAX, so the straddling word is dropped entirely.
+// A prefix of ANSI codes shrinks to nothing when cleaned, so the cut region really
+// reaches the visible text. Every secret value starts with the marker `Zq9`.
+function testSecretsAtTheCutoffAreDropped() {
+  const invisible = '\u001b[0m'.repeat(120); // 480 characters, empty after cleaning
+  const lead = `error:${invisible}ok `; // 489 characters
+  const cases = {
+    'unlabelled long key': `Zq9${'k'.repeat(60)}`,
+    'key=value': `password=Zq9${'v'.repeat(40)}`,
+    'bearer value': `Bearer Zq9${'b'.repeat(40)}`,
+    'flag value': `--token Zq9${'f'.repeat(40)}`,
+    'quoted value': `token="Zq9 ${'q'.repeat(40)}"`,
+  };
+  for (const [impl, format] of notificationImplementations()) {
+    for (const [label, secret] of Object.entries(cases)) {
+      for (const before of [1, 2, 5, 10, 20]) {
+        // The secret starts `before` characters ahead of the cut (NOTIFY_INPUT_MAX - 2 = 510).
+        const pad = 510 - before - lead.length - 1;
+        const reason = `${lead}${'y'.repeat(pad)} ${secret} trailing words`;
+        assert.strictEqual(reason.indexOf(secret), 510 - before, 'test setup: secret straddles the cut');
+        const body = format.body({ agent: 'opencode', status: STATUS.BURN, reason, title: 'Deploy' });
+        assert.ok(!body.includes('Zq9') && !body.includes('Zq'), `${impl} ${label} ${before} before cut: no secret fragment: ${body}`);
+        assert.ok(body.includes('…'), `${impl} ${label} ${before} before cut: truncation is marked: ${body}`);
+      }
+    }
+  }
+  // A secret fully inside the bound is still redacted, not dropped.
+  assert.strictEqual(cleanNotificationText(`${'\u001b[0m'.repeat(100)}password=hunter2 ok`, 80), 'password=[redacted] ok');
+}
+
+function testMalformedNotificationInputs() {
+  for (const [impl, format] of notificationImplementations()) {
+    for (const value of [undefined, null, 0, 42, true, {}, [], ['a'], { toString: () => 'password=hunter2' }]) {
+      const session = { agent: value, status: STATUS.BURN, reason: value, title: value, cwd: '' };
+      const body = format.body(session);
+      assert.strictEqual(typeof body, 'string', `${impl} ${String(value)}: body is a string`);
+      assert.ok(!body.includes('hunter2'), `${impl}: object toString is never used`);
+      assert.match(format.title(session), /^LetItCook: /, `${impl}: title stays well-formed`);
+    }
+  }
 }
 
 function testExtensionNotificationParityWithTracker() {
@@ -580,6 +681,9 @@ function run() {
   testExtensionLifecycleParityWithNode();
   testExtensionNotificationParityWithTracker();
   testNotificationSanitizationParity();
+  testNotificationSanitizerIsBounded();
+  testSecretsAtTheCutoffAreDropped();
+  testMalformedNotificationInputs();
   console.log('All LetItCook GNOME extension compatibility tests passed.');
 }
 
