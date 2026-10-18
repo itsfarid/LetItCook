@@ -11,7 +11,9 @@
 // - A waiting request (permission or question) keeps the session at Your Turn until that
 //   request is resolved or the turn ends; other activity does not hide it.
 // - Done and Burn only change on a new turn (TURN_START) or a new request: late tool
-//   activity cannot regress them.
+//   activity cannot regress them, unless the adapter marks it `revive` (activity that
+//   can only happen when the agent really continues, e.g. another stop hook made it
+//   continue its turn).
 // - Subagent signals are activity of their parent session: a subagent finishing or
 //   failing never completes or burns the parent.
 // - Duplicates are idempotent, and a request resolved earlier is not reopened by a late
@@ -26,6 +28,7 @@ export const SIGNAL = Object.freeze({
   REQUEST_OPEN: 'request_open', // the agent waits for a permission or an answer
   REQUEST_CLOSE: 'request_close', // a waiting request was resolved
   TURN_COMPLETE: 'turn_complete', // documented successful end of the turn
+  TURN_END: 'turn_end', // the turn ended without a reported outcome: the agent waits for the user
   FAILURE: 'failure', // documented failure of the turn
   CANCEL: 'cancel', // the user interrupted the turn; the agent waits for the user
   SESSION_END: 'session_end', // the session ended; its state file is removed
@@ -59,6 +62,7 @@ export function validateSignal(signal) {
     type: signal.type,
     sessionId: signal.sessionId,
     subagent: signal.subagent === true,
+    revive: signal.revive === true,
     reason: boundedString(signal.reason, MAX_REASON),
     title: boundedString(signal.title, MAX_TITLE),
     cwd: boundedString(signal.cwd, MAX_CWD),
@@ -105,9 +109,8 @@ export function reduceSession(prev, signal, context = {}) {
   const settled = status === STATUS.DONE || status === STATUS.BURN;
 
   // A subagent's end of turn, failure or cancellation is activity of its parent.
-  const type = s.subagent && (s.type === SIGNAL.TURN_COMPLETE || s.type === SIGNAL.FAILURE || s.type === SIGNAL.CANCEL)
-    ? SIGNAL.ACTIVITY
-    : s.type;
+  const ending = [SIGNAL.TURN_COMPLETE, SIGNAL.TURN_END, SIGNAL.FAILURE, SIGNAL.CANCEL];
+  const type = s.subagent && ending.includes(s.type) ? SIGNAL.ACTIVITY : s.type;
 
   switch (type) {
     case SIGNAL.TURN_START:
@@ -116,7 +119,7 @@ export function reduceSession(prev, signal, context = {}) {
       reason = s.reason || 'prompt submitted';
       break;
     case SIGNAL.ACTIVITY:
-      if (settled) return null;
+      if (settled && !s.revive) return null;
       if (Object.keys(pending).length === 0) {
         status = STATUS.COOKING;
         reason = s.reason || 'working';
@@ -154,6 +157,11 @@ export function reduceSession(prev, signal, context = {}) {
       pending = {};
       status = STATUS.DONE;
       reason = s.reason || 'turn completed';
+      break;
+    case SIGNAL.TURN_END:
+      pending = {};
+      status = STATUS.YOUR_TURN;
+      reason = s.reason || 'turn ended';
       break;
     case SIGNAL.FAILURE:
       pending = {};

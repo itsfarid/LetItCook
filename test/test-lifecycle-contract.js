@@ -51,6 +51,24 @@ function testFailureAndCancel() {
   assert.strictEqual(cancelled.status, STATUS.YOUR_TURN, 'a user cancel hands the turn back, it is not Burn');
 }
 
+function testTurnEndWithoutOutcome() {
+  const { state } = run([
+    { type: SIGNAL.TURN_START },
+    { type: SIGNAL.REQUEST_OPEN, requestId: 'r1' },
+    { type: SIGNAL.TURN_END },
+  ]);
+  assert.strictEqual(state.status, STATUS.YOUR_TURN, 'a turn without a reported outcome is never Done');
+  assert.deepStrictEqual(state.lifecycle.pending, {});
+  assert.strictEqual(run([{ type: SIGNAL.ACTIVITY }], state).state.status, STATUS.COOKING, 'it is not settled');
+}
+
+function testReviveLeavesDone() {
+  const done = run([{ type: SIGNAL.TURN_START }, { type: SIGNAL.TURN_COMPLETE }]).state;
+  assert.strictEqual(run([{ type: SIGNAL.ACTIVITY }], done).state.status, STATUS.DONE, 'plain late activity keeps Done');
+  assert.strictEqual(run([{ type: SIGNAL.ACTIVITY, revive: true }], done).state.status, STATUS.COOKING, 'revive activity leaves Done');
+  assert.strictEqual(run([{ type: SIGNAL.ACTIVITY, revive: 'yes' }], done).state.status, STATUS.DONE, 'revive must be exactly true');
+}
+
 function testTerminalStatesResistLateEvents() {
   for (const terminal of [SIGNAL.TURN_COMPLETE, SIGNAL.FAILURE]) {
     const { state } = run([
@@ -121,7 +139,7 @@ function testDuplicateAndReorderedRequests() {
 }
 
 function testSubagentsNeverSettleTheParent() {
-  for (const type of [SIGNAL.TURN_COMPLETE, SIGNAL.FAILURE, SIGNAL.CANCEL, SIGNAL.SESSION_END]) {
+  for (const type of [SIGNAL.TURN_COMPLETE, SIGNAL.TURN_END, SIGNAL.FAILURE, SIGNAL.CANCEL, SIGNAL.SESSION_END]) {
     const { state } = run([{ type: SIGNAL.TURN_START }, { type, subagent: true }]);
     assert.strictEqual(state.status, STATUS.COOKING, `a subagent ${type} leaves the parent Cooking`);
     assert.ok(!state.deleted);
@@ -161,6 +179,8 @@ function run_() {
   testValidation();
   testTurnLifecycle();
   testFailureAndCancel();
+  testTurnEndWithoutOutcome();
+  testReviveLeavesDone();
   testTerminalStatesResistLateEvents();
   testRequestsAreNotHiddenByActivity();
   testDuplicateAndReorderedRequests();
