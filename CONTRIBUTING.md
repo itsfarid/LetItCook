@@ -47,8 +47,9 @@ LetItCook/
 │   │   ├── registry.js     # AdapterRegistry for discovery and aggregation
 │   │   └── status.js       # Status constants, session normalization, aggregation
 │   ├── sync.js              # Copilot session sync bridge (poll-based)
-│   └── notify.js            # Notification inspection tool
-├── test/                     # Test suites (11 files, no dependencies)
+│   ├── notify.js            # Notification inspection tool
+│   └── selftest.js          # End-to-end OpenCode self-test (npm run selftest)
+├── test/                     # Test suites (12 files, no dependencies)
 │   ├── test-state.js         # Status normalization, aggregate, adapter contract
 │   ├── test-base-adapter.js
 │   ├── test-copilot.js       # Copilot session/state mapping, reliability
@@ -59,7 +60,8 @@ LetItCook/
 │   ├── test-notification-integration.js
 │   ├── test-filesystem-hardening.js
 │   ├── test-performance.js   # Debouncing, syslog bursts
-│   └── test-extension-compatibility.js
+│   ├── test-extension-compatibility.js
+│   └── test-selftest.js      # Self-test tool helpers and failure cleanup
 ├── package.json              # Tool + test scripts (no package manager)
 ├── AGENTS.md                 # Development philosophy and scope (read-only reference)
 ├── README.md                 # User-facing documentation

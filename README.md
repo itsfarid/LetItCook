@@ -95,6 +95,16 @@ OpenCode reports state through a LetItCook plugin. Add the plugin's **absolute p
 
 Reference the file in place rather than copying it: the plugin imports modules from `src/core/`. Restart OpenCode afterwards. Start a prompt; a file should appear in `~/.local/state/letitcook/sessions/`.
 
+### Check that everything works
+
+With the extension enabled and the plugin configured, run the end-to-end self-test:
+
+```bash
+npm run selftest -- --model deepseek/deepseek-v4-pro
+```
+
+It starts a private, password-protected OpenCode server on `127.0.0.1` in a temporary project. Then it sends one prompt and checks each step: Cooking, then a real permission request (Your Turn), then the GNOME notification, then Cooking again after approval, then Done. It asks whether you saw the popups. It only ever approves the exact command `echo letitcook-selftest`, and it removes the session, server, and temporary project afterwards. Each run makes one short model call. Without `--model`, it uses your most recent OpenCode model. The Done notification step is skipped unless "Notify on Done" is on.
+
 ### Uninstall
 
 ```bash
@@ -254,7 +264,7 @@ npm install  # (no packages installed; kept for potential future additions)
 npm test
 ```
 
-Runs 11 test files covering:
+Runs 12 test files covering:
 
 - State normalization and aggregation
 - Adapter contract and session discovery
@@ -305,7 +315,8 @@ Each command is an independent test. Ready-to-run assertions are included in eve
 | `node src/sync.js --watch [ms]` | Poll Copilot every `[ms]` (default ping 5000) |
 | `node src/notify.js` | Inspect notification transitions (read-only) |
 | `node src/notify.js --include-done` | Include Done transitions in inspection |
-| `node src/notify.js --test [status]` | Send manual test notification |
+| `node src/notify.js --test [status]` | Send manual test notification via `notify-send` (tests desktop delivery only, not the extension) |
+| `npm run selftest -- [--model provider/model] [--no-ask]` | End-to-end OpenCode check: permission request, notification, status changes |
 | `node src/notify.js --dispatch` | Refused (deprecated; causes race conditions) |
 
 ## Troubleshooting
