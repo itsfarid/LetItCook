@@ -1,5 +1,5 @@
 import assert from 'node:assert';
-import { SIGNAL, validateSignal, reduceSession, shouldPersist, HEARTBEAT_MS } from '../src/core/lifecycle.js';
+import { SIGNAL, CAPABILITY, validateSignal, reduceSession, shouldPersist, HEARTBEAT_MS } from '../src/core/lifecycle.js';
 import { STATUS, normalizeSession } from '../src/core/status.js';
 
 const SID = 'sess-1';
@@ -201,6 +201,38 @@ function testEventOrderingMetadata() {
   assert.strictEqual(shouldPersist(a, b), false);
 }
 
+function testCapabilities() {
+  // A producer that cannot tell success from failure declares neither and ends turns
+  // without outcome; a stray completion is not trusted.
+  const limited = run([
+    { type: SIGNAL.TURN_START, capabilities: [CAPABILITY.REQUESTS] },
+    { type: SIGNAL.TURN_COMPLETE },
+    { type: SIGNAL.FAILURE },
+    { type: SIGNAL.CANCEL },
+  ]).state;
+  assert.strictEqual(limited.status, STATUS.COOKING, 'undeclared outcomes are ignored');
+  assert.deepStrictEqual(limited.capabilities, ['requests']);
+  assert.strictEqual(run([{ type: SIGNAL.TURN_END }], limited).state.status, STATUS.YOUR_TURN, 'turn end is always allowed');
+  const noRequests = run([{ type: SIGNAL.TURN_START, capabilities: [CAPABILITY.COMPLETE] }, { type: SIGNAL.REQUEST_OPEN, requestId: 'r' }]).state;
+  assert.strictEqual(noRequests.status, STATUS.COOKING, 'requests need the requests capability');
+
+  // A later declaration replaces the earlier one; metadata never changes the status.
+  const declared = run([{ type: SIGNAL.TURN_START }, { type: SIGNAL.METADATA, capabilities: ['complete', 'fail', 'complete'], cwd: '/w' }]).state;
+  assert.strictEqual(declared.status, STATUS.COOKING);
+  assert.deepStrictEqual(declared.capabilities, ['complete', 'fail'], 'deduplicated and sorted');
+  assert.strictEqual(declared.cwd, '/w');
+  assert.strictEqual(run([{ type: SIGNAL.TURN_COMPLETE }], declared).state.status, STATUS.DONE);
+  assert.strictEqual(reduceSession(null, { type: SIGNAL.METADATA, sessionId: SID, capabilities: [] }, ctx()), null, 'metadata alone creates no session');
+
+  // Without a declaration nothing is restricted (native adapters).
+  assert.strictEqual(run([{ type: SIGNAL.TURN_START }, { type: SIGNAL.TURN_COMPLETE }]).state.status, STATUS.DONE);
+  assert.ok(!('capabilities' in run([{ type: SIGNAL.TURN_START }]).state));
+
+  for (const bad of ['complete', ['done'], [1], ['requests', 'complete', 'fail', 'cancel', 'requests']]) {
+    assert.strictEqual(validateSignal({ type: SIGNAL.TURN_START, sessionId: SID, capabilities: bad }), null, `rejects ${JSON.stringify(bad)}`);
+  }
+}
+
 function testSubagentsNeverSettleTheParent() {
   for (const type of [SIGNAL.TURN_COMPLETE, SIGNAL.TURN_END, SIGNAL.FAILURE, SIGNAL.CANCEL, SIGNAL.SESSION_END]) {
     const { state } = run([{ type: SIGNAL.TURN_START }, { type, subagent: true }]);
@@ -248,6 +280,7 @@ function run_() {
   testRequestsAreNotHiddenByActivity();
   testDuplicateAndReorderedRequests();
   testEventOrderingMetadata();
+  testCapabilities();
   testSubagentsNeverSettleTheParent();
   testSessionEndNeverCompletes();
   testSessionsAreIsolated();
