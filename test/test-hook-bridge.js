@@ -62,11 +62,30 @@ function testLocking() {
     release();
     assert.ok(!fs.existsSync(lock), 'released');
     fs.writeFileSync(lock, '');
-    const old = new Date(Date.now() - 60 * 1000);
+    const old = new Date(Date.now() - 5 * 1000);
     fs.utimesSync(lock, old, old);
     const again = acquireLock(lock, { timeoutMs: 50 });
     assert.ok(again, 'a stale lock from a crashed hook is broken');
     again();
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+}
+
+// A hook that cannot take the lock (another hook holds it) leaves the file untouched:
+// writing unlocked could replace that hook's waiting request.
+function testContendedUpdateIsSkipped() {
+  const { root, dir } = tmpStateDir();
+  try {
+    applySignals('claude', [{ type: SIGNAL.REQUEST_OPEN, sessionId: 's1', requestId: 'r1' }], { stateDir: dir, pid: null });
+    const file = path.join(dir, stateFileName('claude', 's1'));
+    const before = fs.readFileSync(file, 'utf8');
+    const lock = path.join(dir, `.${stateFileName('claude', 's1')}.lock`);
+    fs.writeFileSync(lock, '');
+    const written = applySignals('claude', [{ type: SIGNAL.REQUEST_OPEN, sessionId: 's1', requestId: 'r2' }], { stateDir: dir, pid: null, lockTimeoutMs: 50 });
+    assert.deepStrictEqual(written, [], 'no update without the lock');
+    assert.strictEqual(fs.readFileSync(file, 'utf8'), before, 'the file is untouched');
+    assert.ok(fs.existsSync(lock), "another hook's lock is not removed");
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
@@ -188,6 +207,7 @@ async function run() {
   await testBoundedStdin();
   testFindAgentPid();
   testLocking();
+  testContendedUpdateIsSkipped();
   testReadStateFileSafety();
   testApplySignalsWritesReadableState();
   testUntrustedStateDirIsRefused();
