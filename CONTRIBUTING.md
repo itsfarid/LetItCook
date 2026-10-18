@@ -6,7 +6,7 @@ This document describes how to work on LetItCook as a developer or collaborator.
 
 ```bash
 # 1. Clone the repository
-git clone https://github.com/anomalyco/LetItCook.git
+git clone https://github.com/itsfarid/LetItCook.git
 cd LetItCook
 
 # 2. Verify environment
@@ -70,7 +70,7 @@ LetItCook/
 
 ### 1. Understand the problem before implementing
 
-- Read [AGENTS.md §27](AGENTS.md#27) for guiding principles (personal-first, not prematurely optimized).
+- Read [AGENTS.md §27](AGENTS.md#27-immediate-instructions-for-coding-agents) for guiding principles (personal-first, not prematurely optimized).
 - If adding support for an agent, review `src/adapters/opencode/plugin.js` (Uplink event hook example) and `src/adapters/copilot/adapter.js` (session-state replay example).
 - Identify the most reliable lifecycle mechanism reported by the agent documentation before falling back to terminal parsing.
 
@@ -89,7 +89,7 @@ LetItCook/
 Test command:
 
 ```bash
-npm test                  # Run all (≈ 40s)
+npm test                  # Run all
 node test/test-state.js       # State normalization
 node test/test-copilot.js     # Copilot behavior
 node test/test-plugin.js      # OpenCode plugin
@@ -100,12 +100,11 @@ node test/test-plugin.js      # OpenCode plugin
 After editing `extension/`:
 
 ```bash
-cp extension/* ~/.local/share/gnome-shell/extensions/letitcook@letitcook.local/
-gnome-extensions reload letitcook@letitcook.local
-# Open extension dropdown; verify indicator matches expectations.
+# Copy the variant matching your GNOME version (extension/ for 45+, extension-legacy/ for 42–44)
+cp extension-legacy/* ~/.local/share/gnome-shell/extensions/letitcook@letitcook.local/
 ```
 
-**No destructive reload required** unless override settings are changed.
+Then restart GNOME Shell so it loads the new code. On X11, press Alt + F2, type `r`, and press Enter. On Wayland, log out and back in. `gnome-extensions` has no reload command, and `killall gnome-shell` ends a Wayland session. Open the dropdown and confirm the indicator matches expectations.
 
 ### 5. Self-check before committing
 
@@ -126,7 +125,7 @@ gnome-extensions reload letitcook@letitcook.local
 ### Notification deduplication memo
 
 - `notify_cache.json` tracks `lastStatus`, `notifiedStatus`, and `notifiedAt`.
-- Notification dispatch must check cache first; audits via `node src/notify.py --watch [ms]` or `node src/notify.js`.
+- Notification dispatch must check cache first; audits via `node src/notify.js --watch [ms]` or `node src/notify.js`.
 - Do not add "dispatch" CLI flags; they create race conditions with the GNOME extension. Bug: fetches cover read-only inspection, no CLI auto-dispatch.
 
 ### Older GNOME compatibility
@@ -158,7 +157,7 @@ gnome-extensions reload letitcook@letitcook.local
 
 - Session directory: mode 0700, owned only by the current user.
 - Session files: mode 0600, single-link (nlink=1). Use `fs-safe.js` utilities for hardening.
-- Delete terminated files (Done/Burn/Unknown) automatically via GNOME extension `_update()` cleanup, but do not assume arbitrary deletion without verified termination status.
+- The GNOME extension `_update()` deletes terminated session files after notification evaluation. A session is terminated when it is Done or Burn and its process has exited, or when its process has exited and it has had no update for one hour (`DEAD_SESSION_RETENTION_MS`). Do not delete files without verified termination status.
 
 ### Copilot bridges
 
@@ -195,7 +194,7 @@ Provide:
 - **Agent CLI version** (if relevant): OpenCode/Copilot CLI versions
 - **LetItCook version**: `git describe --tags --always`
 - **Reproduce steps** (commands, agent start flags)
-- **Observed behavior**: panel indicator + log snippets from GNOME Shell (Error Log via Alt+F2 → r and `journalctl --user -f` while triggering).
+- **Observed behavior**: panel indicator + log snippets from GNOME Shell (`journalctl --user -b -g LetItCook`, or `journalctl --user -f` while triggering).
 - **Expected behavior**: expected indicator / notification
 - **Configuration**:
   - Paths to state dir: `ls -lR ~/.local/state/letitcook/sessions/`
