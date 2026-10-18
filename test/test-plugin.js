@@ -56,6 +56,87 @@ async function testTerminalFilesSurvivePluginProcessExit() {
   }
 }
 
+// Regression (reproduced with OpenCode 1.18.35): two parallel bash permission requests;
+// approving the first flipped LetItCook to Cooking while OpenCode was still blocked on
+// the second request. Pending requests must keep the session in Your Turn.
+async function testPendingPermissionRequestsKeepYourTurn() {
+  const plugin = await LetItCookPlugin({});
+  const dir = process.env.LETITCOOK_STATE_DIR;
+  const emit = (type, properties) => plugin.event({ event: { id: 'evt', type, properties } });
+  const state = sid => JSON.parse(fs.readFileSync(path.join(dir, `${sid}.json`), 'utf8'));
+  const tracker = new NotificationTracker({ notifyDone: false, suppressInitial: false });
+  const notifyStatuses = sid => tracker.processSessions([state(sid)]).map(e => e.session.status);
+
+  const shapes = {
+    v1: {
+      ask: (sid, id, cmd) => emit('permission.asked', { id, sessionID: sid, permission: 'bash', patterns: [cmd], always: [], metadata: {} }),
+      reply: (sid, id, reply) => emit('permission.replied', { sessionID: sid, requestID: id, reply }),
+    },
+    v2: {
+      ask: (sid, id, cmd) => emit('permission.v2.asked', { id, sessionID: sid, action: 'bash', resources: [cmd], save: [], metadata: {} }),
+      reply: (sid, id, reply) => emit('permission.v2.replied', { sessionID: sid, requestID: id, reply }),
+    },
+  };
+
+  for (const [name, shape] of Object.entries(shapes)) {
+    const sid = `pending_${name}`;
+    await emit('message.updated', { info: { id: `u_${name}`, sessionID: sid, role: 'user' } });
+    await plugin['tool.execute.before']({ tool: 'bash', sessionID: sid, callID: 'a' }, {});
+    await plugin['tool.execute.before']({ tool: 'bash', sessionID: sid, callID: 'b' }, {});
+    assert.deepStrictEqual(notifyStatuses(sid), [], `${name}: Cooking does not notify`);
+    await shape.ask(sid, 'per_a', 'echo a');
+    await shape.ask(sid, 'per_b', 'echo b');
+    assert.strictEqual(state(sid).status, STATUS.YOUR_TURN, `${name}: asked => Your Turn`);
+    assert.deepStrictEqual(notifyStatuses(sid), [STATUS.YOUR_TURN], `${name}: one Your Turn notification`);
+
+    await shape.reply(sid, 'per_a', 'once');
+    assert.strictEqual(state(sid).status, STATUS.YOUR_TURN, `${name}: one request still pending => Your Turn`);
+    assert.match(state(sid).reason, /echo b/, `${name}: reason names the request still pending`);
+    await plugin['tool.execute.after']({ tool: 'bash', sessionID: sid, callID: 'a' }, {});
+    assert.strictEqual(state(sid).status, STATUS.YOUR_TURN, `${name}: finished sibling tool does not hide the pending request`);
+    assert.deepStrictEqual(notifyStatuses(sid), [], `${name}: no duplicate notification`);
+
+    await shape.reply(sid, 'per_b', 'once');
+    assert.strictEqual(state(sid).status, STATUS.COOKING, `${name}: all requests answered => Cooking`);
+    await plugin['tool.execute.after']({ tool: 'bash', sessionID: sid, callID: 'b' }, {});
+    assert.strictEqual(state(sid).status, STATUS.COOKING);
+    assert.deepStrictEqual(notifyStatuses(sid), [], `${name}: Cooking does not notify`);
+
+    await shape.ask(sid, 'per_c', 'echo c');
+    assert.deepStrictEqual(notifyStatuses(sid), [STATUS.YOUR_TURN], `${name}: a later request notifies again`);
+    await shape.reply(sid, 'per_c', 'reject');
+    assert.strictEqual(state(sid).status, STATUS.COOKING, `${name}: single request answered => Cooking (unchanged behaviour)`);
+  }
+
+  // Questions use the same request/answer lifecycle.
+  await emit('question.asked', { id: 'que_1', sessionID: 'pending_q', questions: [] });
+  await emit('question.asked', { id: 'que_2', sessionID: 'pending_q', questions: [] });
+  await emit('question.rejected', { sessionID: 'pending_q', requestID: 'que_1' });
+  assert.strictEqual(state('pending_q').status, STATUS.YOUR_TURN, 'second question still pending');
+  await emit('question.replied', { sessionID: 'pending_q', requestID: 'que_2', answers: [] });
+  assert.strictEqual(state('pending_q').status, STATUS.COOKING, 'all questions answered');
+
+  // A missed reply can never pin Your Turn: the loop ending clears pending requests.
+  await emit('message.updated', { info: { id: 'u_stuck', sessionID: 'pending_stuck', role: 'user' } });
+  await emit('permission.asked', { id: 'per_lost', sessionID: 'pending_stuck', permission: 'bash', patterns: [] });
+  await emit('session.status', { sessionID: 'pending_stuck', status: { type: 'idle' } });
+  await emit('session.idle', { sessionID: 'pending_stuck' });
+  assert.strictEqual(state('pending_stuck').status, STATUS.UNKNOWN, 'idle without completion evidence stays Unknown, never Done');
+  await emit('message.updated', { info: { id: 'u_stuck_2', sessionID: 'pending_stuck', role: 'user' } });
+  await plugin['tool.execute.after']({ tool: 'bash', sessionID: 'pending_stuck' }, {});
+  assert.strictEqual(state('pending_stuck').status, STATUS.COOKING, 'next turn is Cooking, not a stale Your Turn');
+
+  // Errors still win over pending requests and also clear them.
+  await emit('permission.asked', { id: 'per_err', sessionID: 'pending_err', permission: 'bash', patterns: [] });
+  await emit('session.error', { sessionID: 'pending_err', error: { message: 'boom' } });
+  assert.strictEqual(state('pending_err').status, STATUS.BURN, 'session.error while pending => Burn');
+  await emit('message.updated', { info: { id: 'u_err', sessionID: 'pending_err', role: 'user' } });
+  assert.strictEqual(state('pending_err').status, STATUS.COOKING, 'new prompt after Burn => Cooking');
+
+  // Bookkeeping is process-local and never persisted.
+  assert.strictEqual('_pendingRequests' in state('pending_v1'), false, 'pending bookkeeping not written to state file');
+}
+
 async function testPlugin() {
   const tmpDir = path.join(os.tmpdir(), `letitcook_plug_${Date.now()}`);
   process.env.LETITCOOK_STATE_DIR = tmpDir;
@@ -211,6 +292,7 @@ async function testPlugin() {
     assert.strictEqual(completionPersistedAfterSummary.status, STATUS.DONE,
       'late user message diff summary does not reset Done back to Cooking');
 
+    await testPendingPermissionRequestsKeepYourTurn();
     await testTerminalFilesSurvivePluginProcessExit();
 
     console.log('LetItCook plugin tests passed.');
