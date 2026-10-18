@@ -2,6 +2,7 @@ import { OpenCodeAdapter } from '../adapters/opencode/adapter.js';
 import { CopilotAdapter } from '../adapters/copilot/adapter.js';
 import { ClaudeAdapter } from '../adapters/claude/hooks.js';
 import { CodexAdapter } from '../adapters/codex/hooks.js';
+import { GeminiAdapter } from '../adapters/gemini/hooks.js';
 import { aggregateState } from './status.js';
 
 export class AdapterRegistry {
@@ -78,6 +79,7 @@ export function createDefaultRegistry() {
   registry.register(new CopilotAdapter());
   registry.register(new ClaudeAdapter());
   registry.register(new CodexAdapter());
+  registry.register(new GeminiAdapter());
   return registry;
 }
 
