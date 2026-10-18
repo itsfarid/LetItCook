@@ -312,11 +312,62 @@ function testCopilotSyncFreshness() {
   }
 }
 
+// Unchanged sessions are not replayed again on later sync ticks; changed, added and
+// deleted sessions are picked up on the next tick.
+function testReplayCacheTracksChanges() {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'letitcook-copilot-cache-'));
+  const originalRead = fs.readFileSync;
+  let eventReads = 0;
+  fs.readFileSync = (file, ...rest) => {
+    if (String(file).endsWith('events.jsonl')) eventReads++;
+    return originalRead(file, ...rest);
+  };
+  try {
+    const stateDir = path.join(root, 'session-state');
+    const ts = () => new Date().toISOString();
+    const mk = (id, events) => {
+      const dir = path.join(stateDir, id);
+      fs.mkdirSync(dir, { recursive: true });
+      fs.writeFileSync(path.join(dir, 'workspace.yaml'), `id: ${id}\n`);
+      fs.writeFileSync(path.join(dir, 'events.jsonl'), events.map(e => JSON.stringify({ ...e, timestamp: ts() })).join('\n') + '\n');
+      return dir;
+    };
+    const start = id => ({ type: 'session.start', data: { sessionId: id } });
+    const dirA = mk('cache-a', [start('cache-a')]);
+    mk('cache-b', [start('cache-b')]);
+    const adapter = new CopilotAdapter();
+    const statuses = () => Object.fromEntries(adapter.detectSessions({ copilotDir: root }).map(x => [x.session_id, x.status]));
+
+    assert.deepStrictEqual(statuses(), { 'cache-a': STATUS.COOKING, 'cache-b': STATUS.COOKING });
+    assert.strictEqual(eventReads, 2, 'first tick replays both sessions');
+    statuses();
+    statuses();
+    assert.strictEqual(eventReads, 2, 'unchanged sessions are not replayed again');
+
+    fs.appendFileSync(path.join(dirA, 'events.jsonl'), JSON.stringify({ type: 'permission.requested', data: { sessionId: 'cache-a' }, timestamp: ts() }) + '\n');
+    assert.deepStrictEqual(statuses(), { 'cache-a': STATUS.YOUR_TURN, 'cache-b': STATUS.COOKING }, 'changed session re-replayed, other unaffected');
+    assert.strictEqual(eventReads, 3, 'only the changed session was replayed');
+
+    mk('cache-c', [start('cache-c')]);
+    fs.rmSync(path.join(stateDir, 'cache-b'), { recursive: true });
+    assert.deepStrictEqual(statuses(), { 'cache-a': STATUS.YOUR_TURN, 'cache-c': STATUS.COOKING }, 'added session appears, deleted one disappears');
+    assert.strictEqual(adapter._replayCache.size, 2, 'cache entry of the deleted session is dropped');
+
+    // Staleness still follows the clock on cached sessions.
+    const later = adapter.detectSessions({ copilotDir: root, now: Date.now() + 10 * 60 * 1000 });
+    assert.ok(later.every(x => x.status === STATUS.UNKNOWN && x.stale), 'cached sessions still go stale over time');
+  } finally {
+    fs.readFileSync = originalRead;
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+}
+
 function run() {
   testYamlParser();
   testCopilotEventMapping();
   testCopilotDirectoryReadingAndSync();
   testCopilotSyncFreshness();
+  testReplayCacheTracksChanges();
   console.log('All Copilot adapter tests passed.');
 }
 

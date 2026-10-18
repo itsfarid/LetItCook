@@ -230,7 +230,8 @@ export function mapCopilotEvent(event, previousState = null) {
   };
 }
 
-export function readSessionFromDir(sessionDirPath, options = {}) {
+// Replays a session directory into its raw (not yet normalized) state.
+function replaySessionDir(sessionDirPath) {
   if (!fs.existsSync(sessionDirPath)) return null;
 
   const wsPath = path.join(sessionDirPath, 'workspace.yaml');
@@ -288,16 +289,42 @@ export function readSessionFromDir(sessionDirPath, options = {}) {
     } catch {}
   }
 
+  return state;
+}
+
+function normalizeReplayed(state, options) {
   const normalized = normalizeSession(state, options);
   if (!isValidSessionId(normalized.session_id)) {
-    normalized.session_id = sessionId;
+    normalized.session_id = state.session_id;
   }
   return normalized;
+}
+
+export function readSessionFromDir(sessionDirPath, options = {}) {
+  const state = replaySessionDir(sessionDirPath);
+  return state ? normalizeReplayed(state, options) : null;
+}
+
+// Identity of a session directory's inputs; replay is skipped while it is unchanged.
+function sessionInputsKey(sessionDirPath) {
+  const parts = [];
+  for (const name of ['workspace.yaml', 'events.jsonl']) {
+    try {
+      const st = fs.statSync(path.join(sessionDirPath, name));
+      parts.push(`${st.ino}:${st.size}:${st.mtimeMs}`);
+    } catch {
+      parts.push('-');
+    }
+  }
+  return parts.join('|');
 }
 
 export class CopilotAdapter extends BaseAdapter {
   constructor() {
     super('copilot', 'GitHub Copilot CLI');
+    // session dir path -> { key, state }: replayed state of unchanged sessions is reused
+    // between sync ticks; normalization (time-dependent staleness) still runs every tick.
+    this._replayCache = new Map();
   }
 
   isAvailable() {
@@ -320,18 +347,29 @@ export class CopilotAdapter extends BaseAdapter {
 
     const entries = fs.readdirSync(sessionStateDir).filter(f => !f.startsWith('.'));
     const sessions = [];
+    const seen = new Set();
 
     for (const entry of entries) {
       const fullPath = path.join(sessionStateDir, entry);
       try {
         const stat = fs.statSync(fullPath);
         if (stat.isDirectory()) {
-          const session = readSessionFromDir(fullPath, options);
+          seen.add(fullPath);
+          const key = sessionInputsKey(fullPath);
+          let cached = this._replayCache.get(fullPath);
+          if (!cached || cached.key !== key) {
+            cached = { key, state: replaySessionDir(fullPath) };
+            this._replayCache.set(fullPath, cached);
+          }
+          const session = cached.state ? normalizeReplayed(cached.state, options) : null;
           if (session && !session.terminated) {
             sessions.push(session);
           }
         }
       } catch {}
+    }
+    for (const dir of this._replayCache.keys()) {
+      if (!seen.has(dir)) this._replayCache.delete(dir);
     }
 
     return sessions;
