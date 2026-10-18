@@ -158,6 +158,23 @@ Goose 1.46 has documented lifecycle hooks: Open Plugins, `~/.agents/plugins/<nam
 
 A Goose adapter becomes reasonable once Goose exposes a hook for approval requests, or if LetItCook could reliably limit the adapter to the fully automatic mode.
 
+## A generic event protocol (evaluated, deferred)
+
+Another option was a documented local JSON protocol that any agent could write to without adapter code. It is deferred:
+
+- **Adapters are already small.** Every agent evaluated here exposes its own hook payloads, not a format LetItCook could prescribe. Supporting such an agent takes a short pure `toSignals` mapping on top of the shared bridge, contract and conformance suite, with no change to the core.
+- **It would only move the mapping.** It helps an agent that can emit LetItCook signals itself, and no such agent exists yet. Building it now would be the kind of speculative feature AGENTS.md rules out.
+- **It would add a trust surface.** That means another input format to version, validate and support, and a decision about which local senders to trust.
+
+If an agent needs it later, the smallest safe form would be a `generic` hook adapter:
+- **Transport:** stdin of `src/hooks/hook.js`, with no listening socket and no new IPC.
+- **Payload:** one JSON object `{ "schema": 1, "type": <signal>, "session_id", "request_id"?, "parent_session_id"?, "reason"?, "cwd"? }`.
+- **Validation:** checked by `validateSignal`, with unknown schemas and types ignored.
+- **Trust:** the same as the hooks, since the sender is a command the user configured, running as the user, writing to the user's private state directory.
+- **Ordering:** duplicate and out-of-order handling as in the contract above.
+- **Content:** no field is ever executed.
+- **Tests:** a sample producer, plus a spec in the conformance suite.
+
 ## Adding an adapter
 
 1. **Research.** Read the agent's documented lifecycle mechanism and record, for each state, the event that proves it. Keep verified facts and assumptions apart. If no trustworthy event exists for a state, do not emit that state.
