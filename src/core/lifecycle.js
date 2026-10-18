@@ -17,7 +17,10 @@
 // - Subagent signals are activity of their parent session: a subagent finishing or
 //   failing never completes or burns the parent.
 // - Duplicates are idempotent, and a request resolved earlier is not reopened by a late
-//   duplicate of its opening event.
+//   duplicate of its opening event. Adapters whose request ids are not unique (derived
+//   from the tool call, so an identical later call reuses the id) and whose provider
+//   runs hooks synchronously, so a resolution cannot precede its request, resolve with
+//   `remember: false`.
 
 import { STATUS } from './status.js';
 import { isValidSessionId } from './fs-safe.js';
@@ -63,6 +66,7 @@ export function validateSignal(signal) {
     sessionId: signal.sessionId,
     subagent: signal.subagent === true,
     revive: signal.revive === true,
+    remember: signal.remember !== false,
     reason: boundedString(signal.reason, MAX_REASON),
     title: boundedString(signal.title, MAX_TITLE),
     cwd: boundedString(signal.cwd, MAX_CWD),
@@ -136,7 +140,7 @@ export function reduceSession(prev, signal, context = {}) {
     }
     case SIGNAL.REQUEST_CLOSE: {
       if (settled) return null;
-      closed = closedWith(closed, s.requestId);
+      if (s.remember) closed = closedWith(closed, s.requestId);
       // Resolving a request that is not waiting (unknown, or a duplicate) changes no status.
       if (s.requestId && !(s.requestId in pending)) {
         if (!prev) return null;

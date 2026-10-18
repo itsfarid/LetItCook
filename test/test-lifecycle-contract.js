@@ -133,6 +133,15 @@ function testDuplicateAndReorderedRequests() {
   const once = run([{ type: SIGNAL.TURN_START }, { type: SIGNAL.REQUEST_OPEN, requestId: 'r1' }]).state;
   const twice = run([{ type: SIGNAL.TURN_START }, { type: SIGNAL.REQUEST_OPEN, requestId: 'r1' }, { type: SIGNAL.REQUEST_OPEN, requestId: 'r1' }]).state;
   assert.deepStrictEqual({ ...once, updated_at: 0 }, { ...twice, updated_at: 0 });
+  // Non-unique ids: an identical later request is shown again when resolutions are not remembered.
+  const reused = run([
+    { type: SIGNAL.TURN_START },
+    { type: SIGNAL.REQUEST_OPEN, requestId: 'perm:Bash:abc' },
+    { type: SIGNAL.REQUEST_CLOSE, requestId: 'perm:Bash:abc', remember: false },
+    { type: SIGNAL.REQUEST_OPEN, requestId: 'perm:Bash:abc' },
+  ]).state;
+  assert.strictEqual(reused.status, STATUS.YOUR_TURN, 'an identical later request is not suppressed');
+  assert.deepStrictEqual(reused.lifecycle.closed, []);
   // Bounded bookkeeping.
   const many = run([{ type: SIGNAL.TURN_START }, ...Array.from({ length: 100 }, (_, i) => ({ type: SIGNAL.REQUEST_CLOSE, requestId: `c${i}` }))]).state;
   assert.ok(many.lifecycle.closed.length <= 32, 'resolved-request memory is bounded');
