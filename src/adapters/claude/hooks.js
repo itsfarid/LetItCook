@@ -46,6 +46,7 @@ export const claudeHooks = {
   events: [
     'UserPromptSubmit', 'PreToolUse', 'PostToolUse', 'PostToolUseFailure',
     'PermissionRequest', 'PermissionDenied', 'Elicitation', 'ElicitationResult',
+    'Stop', 'StopFailure', 'SessionEnd',
   ],
 
   toSignals(input) {
@@ -61,7 +62,9 @@ export const claudeHooks = {
       case 'UserPromptSubmit':
         return [{ ...base, type: SIGNAL.TURN_START, title: str(input.session_title) }];
       case 'PreToolUse': {
-        const signals = [{ ...base, type: SIGNAL.ACTIVITY, reason: `tool:${tool}` }];
+        // The main agent starting a tool is new work even after Stop: Claude Code continues
+        // a turn when another Stop hook blocks it, without a new prompt.
+        const signals = [{ ...base, type: SIGNAL.ACTIVITY, reason: `tool:${tool}`, revive: true }];
         // The question is shown to the user while this tool runs.
         if (input.tool_name === QUESTION_TOOL) signals.push({ ...base, type: SIGNAL.REQUEST_OPEN, requestId: questionId, reason: 'question' });
         return signals;
@@ -71,7 +74,12 @@ export const claudeHooks = {
       case 'PermissionDenied': {
         const signals = [{ ...base, type: SIGNAL.REQUEST_CLOSE, requestId: permissionId(input), remember: false }];
         if (input.tool_name === QUESTION_TOOL) signals.push({ ...base, type: SIGNAL.REQUEST_CLOSE, requestId: questionId, remember: false });
-        signals.push({ ...base, type: SIGNAL.ACTIVITY, reason: `tool:${tool}` });
+        if (event === 'PostToolUseFailure' && input.is_interrupt === true) {
+          // The user interrupted the turn (Esc) while this tool ran; Stop does not fire.
+          signals.push({ ...base, type: SIGNAL.CANCEL, reason: 'interrupted' });
+        } else {
+          signals.push({ ...base, type: SIGNAL.ACTIVITY, reason: `tool:${tool}` });
+        }
         return signals;
       }
       case 'PermissionRequest':
@@ -80,6 +88,14 @@ export const claudeHooks = {
         return [{ ...base, type: SIGNAL.REQUEST_OPEN, requestId: elicitationId, reason: `elicitation:${label(input.mcp_server_name, 'mcp')}` }];
       case 'ElicitationResult':
         return [{ ...base, type: SIGNAL.REQUEST_CLOSE, requestId: elicitationId, remember: false }];
+      // Stop: the main agent finished responding. It does not fire on a user interrupt,
+      // and API errors fire StopFailure instead.
+      case 'Stop':
+        return [{ ...base, type: SIGNAL.TURN_COMPLETE, reason: 'turn completed' }];
+      case 'StopFailure':
+        return [{ ...base, type: SIGNAL.FAILURE, reason: `error:${label(input.error)}` }];
+      case 'SessionEnd':
+        return [{ ...base, type: SIGNAL.SESSION_END }];
       default:
         return [];
     }
