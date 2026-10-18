@@ -35,7 +35,26 @@ export const SIGNAL = Object.freeze({
   FAILURE: 'failure', // documented failure of the turn
   CANCEL: 'cancel', // the user interrupted the turn; the agent waits for the user
   SESSION_END: 'session_end', // the session ended; its state file is removed
+  METADATA: 'metadata', // updates capabilities or cwd of an existing session only
 });
+
+// Outcomes a producer can declare it reports. Once a session has a declaration, signals
+// needing an undeclared capability are ignored: a producer that cannot tell success from
+// failure must not claim Done or Burn.
+export const CAPABILITY = Object.freeze({
+  REQUESTS: 'requests',
+  COMPLETE: 'complete',
+  FAIL: 'fail',
+  CANCEL: 'cancel',
+});
+const CAPABILITIES = new Set(Object.values(CAPABILITY));
+const REQUIRED_CAPABILITY = {
+  request_open: CAPABILITY.REQUESTS,
+  request_close: CAPABILITY.REQUESTS,
+  turn_complete: CAPABILITY.COMPLETE,
+  failure: CAPABILITY.FAIL,
+  cancel: CAPABILITY.CANCEL,
+};
 
 const SIGNAL_TYPES = new Set(Object.values(SIGNAL));
 const MAX_REASON = 120;
@@ -90,6 +109,11 @@ export function validateSignal(signal) {
     if (!Number.isSafeInteger(signal.at) || signal.at <= 0) return null;
     clean.at = signal.at;
   }
+  if (signal.capabilities !== undefined) {
+    const caps = signal.capabilities;
+    if (!Array.isArray(caps) || caps.length > CAPABILITIES.size || !caps.every(c => CAPABILITIES.has(c))) return null;
+    clean.capabilities = [...new Set(caps)].sort();
+  }
   return clean;
 }
 
@@ -118,6 +142,11 @@ export function reduceSession(prev, signal, context = {}) {
   if (s.type === SIGNAL.SESSION_END) {
     return s.subagent ? null : { session_id: s.sessionId, agent, deleted: true, updated_at: now };
   }
+
+  if (s.type === SIGNAL.METADATA && !prev) return null;
+  const capabilities = s.capabilities || (prev && Array.isArray(prev.capabilities) ? prev.capabilities : undefined);
+  const needed = !s.subagent && REQUIRED_CAPABILITY[s.type];
+  if (needed && capabilities && !capabilities.includes(needed)) return null;
 
   const lifecycle = (prev && prev.lifecycle) || {};
   let pending = { ...(lifecycle.pending || {}) };
@@ -206,6 +235,8 @@ export function reduceSession(prev, signal, context = {}) {
       status = STATUS.YOUR_TURN;
       reason = s.reason || 'cancelled';
       break;
+    case SIGNAL.METADATA:
+      break;
     default:
       return null;
   }
@@ -227,6 +258,7 @@ export function reduceSession(prev, signal, context = {}) {
   else if (seen.length) record.lifecycle.seen = seen;
   if (turn) record.lifecycle.turn = turn;
   if (turnAt) record.lifecycle.turnAt = turnAt;
+  if (capabilities) record.capabilities = capabilities;
   const parent = s.parentSessionId || (prev && prev.parent_session_id);
   if (parent) record.parent_session_id = parent;
   return record;
@@ -239,6 +271,7 @@ export function shouldPersist(prev, next, heartbeatMs = HEARTBEAT_MS) {
   if (!prev || next.deleted) return true;
   const fields = ['status', 'reason', 'title', 'cwd', 'pid', 'parent_session_id'];
   if (fields.some(f => prev[f] !== next[f])) return true;
+  if (JSON.stringify(prev.capabilities) !== JSON.stringify(next.capabilities)) return true;
   // The record of applied event ids alone is not worth a write: re-applying an event whose
   // id was not persisted changes nothing (it was a no-op or idempotent activity).
   const bookkeeping = ({ seen, ...rest } = {}) => JSON.stringify(rest);
@@ -247,4 +280,4 @@ export function shouldPersist(prev, next, heartbeatMs = HEARTBEAT_MS) {
   return active && !(next.updated_at - prev.updated_at < heartbeatMs);
 }
 
-export default { SIGNAL, HEARTBEAT_MS, validateSignal, reduceSession, shouldPersist };
+export default { SIGNAL, CAPABILITY, HEARTBEAT_MS, validateSignal, reduceSession, shouldPersist };
