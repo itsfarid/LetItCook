@@ -275,11 +275,36 @@ function testOpenCodeAdapterContract() {
   assert.strictEqual(typeof adapter.stopMonitoring, 'function');
 }
 
+// Availability is checked in controlled environments, so the result does not depend on
+// whether OpenCode happens to be installed where the tests run.
 function testOpenCodeAdapterAvailability() {
   const adapter = new OpenCodeAdapter();
-  const available = adapter.isAvailable();
-  assert.strictEqual(typeof available, 'boolean', 'isAvailable returns boolean');
-  assert.ok(available, 'OpenCode must be detected as available on this machine');
+  const saved = { HOME: process.env.HOME, PATH: process.env.PATH, OPENCODE_BIN: process.env.OPENCODE_BIN };
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'letitcook-avail-'));
+  try {
+    const home = path.join(root, 'home');
+    const bin = path.join(root, 'bin');
+    fs.mkdirSync(home);
+    fs.mkdirSync(bin);
+    process.env.HOME = home;
+    process.env.PATH = path.join(root, 'empty');
+    delete process.env.OPENCODE_BIN;
+    assert.strictEqual(adapter.isAvailable(), false, 'not available without binary, PATH entry or ~/.opencode');
+    process.env.OPENCODE_BIN = '/opt/opencode';
+    assert.strictEqual(adapter.isAvailable(), true, 'OPENCODE_BIN makes it available');
+    delete process.env.OPENCODE_BIN;
+    fs.writeFileSync(path.join(bin, 'opencode'), '', { mode: 0o755 });
+    process.env.PATH = bin;
+    assert.strictEqual(adapter.isAvailable(), true, 'opencode on PATH makes it available');
+    process.env.PATH = path.join(root, 'empty');
+    fs.mkdirSync(path.join(home, '.opencode'));
+    assert.strictEqual(adapter.isAvailable(), true, '~/.opencode makes it available');
+  } finally {
+    for (const [key, value] of Object.entries(saved)) {
+      if (value === undefined) delete process.env[key]; else process.env[key] = value;
+    }
+    fs.rmSync(root, { recursive: true, force: true });
+  }
 }
 
 function testOpenCodeAdapterSessionDiscovery() {
