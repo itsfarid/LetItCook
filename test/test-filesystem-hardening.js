@@ -357,6 +357,32 @@ function testExtensionStateDirPermissionsSource() {
   }
 }
 
+// Session files are documented as owner-only (0600); previously they inherited the
+// umask (0644 observed on a real install), relying solely on the 0700 directory.
+function testSessionFilesArePrivate() {
+  const root = mkTmp('fs-file-mode');
+  const oldUmask = process.umask(0o022);
+  try {
+    const target = path.join(root, 'letitcook', 'sessions');
+    writeSessionFile({ session_id: 'ses_mode', agent: 'opencode', status: STATUS.COOKING }, target);
+    assert.strictEqual(mode(path.join(target, 'ses_mode.json')), 0o600, 'OpenCode session file is 0600');
+    // Rewriting keeps it private.
+    writeSessionFile({ session_id: 'ses_mode', agent: 'opencode', status: STATUS.DONE }, target);
+    assert.strictEqual(mode(path.join(target, 'ses_mode.json')), 0o600, 'rewritten session file stays 0600');
+
+    const copilotDir = path.join(root, 'copilot');
+    const sdir = path.join(copilotDir, 'session-state', 'cp-mode');
+    fs.mkdirSync(sdir, { recursive: true });
+    fs.writeFileSync(path.join(sdir, 'workspace.yaml'), 'id: cp-mode\n');
+    fs.writeFileSync(path.join(sdir, 'events.jsonl'), JSON.stringify({ type: 'session.start', data: { sessionId: 'cp-mode' }, timestamp: new Date().toISOString() }) + '\n');
+    new CopilotAdapter().syncToStateDir(target, { copilotDir });
+    assert.strictEqual(mode(path.join(target, 'copilot_cp-mode.json')), 0o600, 'Copilot synced file is 0600');
+  } finally {
+    process.umask(oldUmask);
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+}
+
 function run() {
   testSessionIdValidator();
   testOpenCodeRejectsTraversal();
@@ -364,6 +390,7 @@ function run() {
   testCopilotRejectsTraversal();
   testPrivateDirectoryPermissions();
   testCopilotSyncCreatesPrivateDir();
+  testSessionFilesArePrivate();
   testExtensionEnumeratorCleanup();
   testExtensionStateDirPermissionsSource();
   console.log('All LetItCook filesystem hardening tests passed.');
