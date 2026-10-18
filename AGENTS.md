@@ -878,7 +878,7 @@ Current adapter support (2026-10-07, verified on this machine):
 | GitHub Copilot CLI | 1.0.92 | **Supported** | Documented session-event log (`~/.copilot/session-state/*/events.jsonl` + `workspace.yaml`), replayed by adapter; `src/sync.js` bridges to state dir |
 | Claude Code | 2.1.295 | **Supported (fixture-tested only)** | Official command hooks → `src/hooks/hook.js claude` → shared lifecycle contract; see `docs/adapters.md` |
 | Gemini CLI | 0.56.0 | Detected but unsupported | Has `gemini hooks` management; candidate after Claude |
-| Codex CLI | 0.147.0 | Detected but unsupported | Sessions + sqlite state observed; hook/notify mechanism needs research |
+| Codex CLI | 0.160.1 | **Supported (fixture-tested only, no Burn)** | Official hooks (`~/.codex/hooks.json`) → `src/hooks/hook.js codex`; see `docs/adapters.md` |
 | Goose | 1.46.0 | Detected but unsupported | No hook mechanism found yet; recipes only |
 
 Copilot adapter state reliability (based on the official `session-events.schema.json`

@@ -21,7 +21,7 @@ agent ──event──▶ adapter ──normalized session JSON──▶ state 
 - The **state directory** (`$XDG_STATE_HOME/letitcook/sessions`) is the only interface to the GNOME extension. Each session is one JSON file with `session_id`, `agent`, `status`, `reason`, `title`, `cwd`, `pid`, `created_at` and `updated_at`. The extension is agent-agnostic: it reads every regular `*.json` file and applies the same staleness and process-exit rules to all of them (`normalizeSession` in `src/core/status.js`, mirrored in both extension variants).
 - **OpenCode** pushes state from an in-process plugin (`src/adapters/opencode/plugin.js`).
 - **Copilot CLI** is replayed from its event log by `node src/sync.js --watch` (`src/adapters/copilot/adapter.js`).
-- **Hook-based agents** (Claude Code so far) run `node src/hooks/hook.js <agent>` for each hook event. The event JSON arrives on stdin, and the hook writes `<agent>_<session>.json`.
+- **Hook-based agents** (Claude Code, Codex CLI) run `node src/hooks/hook.js <agent>` for each hook event. The event JSON arrives on stdin, and the hook writes `<agent>_<session>.json`.
 
 ### Hook-based adapters
 
@@ -93,6 +93,39 @@ Notes:
 - **Mismatched input.** A different `PreToolUse` hook may rewrite a tool's input (`updatedInput`). The resolution then no longer matches the request, which stays shown until the turn ends.
 - **Hooks run synchronously** (documented), so the order of events is kept. Parallel tool calls run their hooks concurrently; the bridge's lock covers that.
 - **Process tracking.** The panel tracks the `claude` process found above the hook's shell. Once it exits, a Done or Burn session is removed and a Cooking or Your Turn session becomes Unknown.
+
+## Codex CLI
+
+**Verified against:**
+- the official hooks documentation (https://learn.chatgpt.com/docs/hooks; https://developers.openai.com/codex/hooks redirects there);
+- the openai/codex source at tag `rust-v0.160.1`: the input schemas in `codex-rs/hooks/schema/generated`, `hook_config.rs`, `discovery.rs` and `core/src/session/turn.rs`;
+- `codex features list` on the installed CLI, which reports `hooks` as stable and enabled.
+
+**Status:** implemented and fixture-tested; not run against the real CLI or verified in GNOME.
+
+| Hook event | Signal |
+|---|---|
+| `UserPromptSubmit` | `turn_start` (a subagent's own prompt is subagent activity) |
+| `PreToolUse` | `activity`, with `revive` for the main agent |
+| `PermissionRequest` | `request_open` (`permission:<tool>`); like Claude Code, it is identified by its tool call |
+| `PostToolUse` | Resolves the call's permission, then `activity` |
+| `Stop` | `turn_complete`. Codex runs it only when a turn finishes normally; subagents run `SubagentStop` instead |
+| `Interrupt` | `cancel` |
+| `SubagentStart`, `SubagentStop`, and events carrying `agent_id` | Subagent `activity` |
+| `SessionEnd` | `session_end` |
+
+Limitations:
+
+- **No Burn.** An errored turn ends without `Stop` and no hook reports the error. The session stays Cooking and becomes Unknown after 5 minutes. The error is only recorded in Codex's rollout files, which LetItCook does not read.
+- **Questions are not shown.** `request_user_input` calls no hook.
+- **Automatically reviewed permissions.** `PermissionRequest` runs before the Guardian auto-reviewer decides. An approval it grants on its own shows a brief Your Turn until the tool runs. One it denies stays shown until the turn ends.
+- **Trust.** Codex runs a non-managed hook only after the user trusts it in `/hooks`, and asks again whenever the hook changes.
+- **Login shell.** Hooks run through `$SHELL -lc`. A login profile that prints to stdout could produce output Codex rejects from `Stop` and `Interrupt` hooks. The LetItCook hook itself prints nothing.
+- **Clean shutdown only.** `SessionEnd` runs only on a clean shutdown. A killed Codex leaves the session to the process-exit rule (Unknown, then removed after an hour).
+
+## Gemini CLI and Goose (not implemented yet)
+
+Both have documented hooks, but neither reports how a turn ended. Their research notes, and the reasons support is limited or deferred, are tracked in the pull request that introduced these adapters.
 
 ## Adding an adapter
 
