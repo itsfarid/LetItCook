@@ -200,6 +200,32 @@ async function testRunHookNeverThrows() {
   }
 }
 
+async function testAdapterTargetsAndFileNames() {
+  const { root, dir } = tmpStateDir();
+  try {
+    const stdin = text => Readable.from([Buffer.from(text)]);
+    const routed = {
+      id: 'router',
+      maxInputBytes: 64,
+      target: input => (input.ok ? { agent: input.agent, fileName: sid => `@${input.agent}.${sid}.json`, pid: 77 } : null),
+      toSignals: input => [{ type: SIGNAL.TURN_START, sessionId: input.session_id }],
+    };
+    await runHook(routed, { stdin: stdin('{"ok":true,"agent":"tool","session_id":"s1"}'), stateDir: dir, pid: null });
+    const state = JSON.parse(fs.readFileSync(path.join(dir, '@tool.s1.json'), 'utf8'));
+    assert.strictEqual(state.agent, 'tool', 'the target names the agent');
+    assert.strictEqual(state.pid, 77, 'and may name the pid');
+    assert.deepStrictEqual(await runHook(routed, { stdin: stdin('{"ok":false,"agent":"x","session_id":"s2"}'), stateDir: dir, pid: null }), [], 'rejected target');
+    assert.deepStrictEqual(await runHook(routed, { stdin: stdin(`{"ok":true,"agent":"tool","session_id":"s3","pad":"${'x'.repeat(80)}"}`), stateDir: dir, pid: null }), [], 'adapter input limit');
+
+    for (const bad of [() => '../x.json', () => 'a/b.json', () => '.hidden.json', () => 'x.txt', () => 42]) {
+      assert.deepStrictEqual(applySignals('a', [{ type: SIGNAL.TURN_START, sessionId: 's9' }], { stateDir: dir, pid: null, fileName: bad }), [], `unsafe file name ${bad()}`);
+    }
+    assert.deepStrictEqual(fs.readdirSync(dir).sort(), ['@tool.s1.json']);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+}
+
 // Hook processes for parallel tool calls run at the same time. Without the lock their
 // read-modify-write cycles would lose requests.
 async function testConcurrentHooksKeepEveryRequest() {
@@ -237,6 +263,7 @@ async function run() {
   testApplySignalsWritesReadableState();
   testUntrustedStateDirIsRefused();
   await testRunHookNeverThrows();
+  await testAdapterTargetsAndFileNames();
   await testConcurrentHooksKeepEveryRequest();
   console.log('All LetItCook hook bridge tests passed.');
 }

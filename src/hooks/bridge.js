@@ -163,14 +163,21 @@ export function stateFileName(agent, sessionId) {
 
 // Applies an adapter's signals to the state directory. Returns the records written or
 // removed (for tests and diagnostics).
-export function applySignals(agent, signals, { stateDir = getSessionDir(), now = Date.now(), pid = null, lockTimeoutMs = LOCK_TIMEOUT_MS } = {}) {
+// `fileName(sessionId)` names the session file (default `<agent>_<session>.json`); it must
+// derive the name from validated ids only, never from free input.
+export function applySignals(agent, signals, {
+  stateDir = getSessionDir(), now = Date.now(), pid = null, lockTimeoutMs = LOCK_TIMEOUT_MS,
+  fileName = sessionId => stateFileName(agent, sessionId),
+} = {}) {
   const results = [];
   if (!Array.isArray(signals) || signals.length === 0) return results;
   ensurePrivateDir(stateDir);
   for (const signal of signals) {
     if (!signal || !isValidSessionId(signal.sessionId)) continue;
-    const filePath = path.join(stateDir, stateFileName(agent, signal.sessionId));
-    const release = acquireLock(path.join(stateDir, `.${stateFileName(agent, signal.sessionId)}.lock`), { timeoutMs: lockTimeoutMs });
+    const name = fileName(signal.sessionId);
+    if (typeof name !== 'string' || !name.endsWith('.json') || name !== path.basename(name) || name.startsWith('.')) continue;
+    const filePath = path.join(stateDir, name);
+    const release = acquireLock(path.join(stateDir, `.${name}.lock`), { timeoutMs: lockTimeoutMs });
     if (!release) continue;
     try {
       const prev = readStateFile(filePath, { sessionId: signal.sessionId, agent });
@@ -192,17 +199,26 @@ export function applySignals(agent, signals, { stateDir = getSessionDir(), now =
 }
 
 // Entry point for one hook invocation. Never throws.
+//
+// An adapter may also define `maxInputBytes` (default MAX_INPUT_BYTES) and
+// `target(input, now)`, returning `{ agent, fileName, pid? }` for inputs that name their own
+// producer (the generic event protocol), or null to reject the input.
 export async function runHook(adapter, { stdin = process.stdin, stateDir, now, pid } = {}) {
   try {
-    const input = parseHookInput(await readBoundedStdin(stdin));
+    const input = parseHookInput(await readBoundedStdin(stdin, adapter.maxInputBytes || MAX_INPUT_BYTES));
     if (!input) return [];
-    const signals = adapter.toSignals(input);
+    const at = now || Date.now();
+    const target = typeof adapter.target === 'function' ? adapter.target(input, at) : { agent: adapter.id };
+    if (!target) return [];
+    const signals = adapter.toSignals(input, at);
     if (!Array.isArray(signals) || signals.length === 0) return [];
-    return applySignals(adapter.id, signals, {
+    const options = {
       stateDir: stateDir || getSessionDir(),
-      now: now || Date.now(),
-      pid: pid === undefined ? findAgentPid() : pid,
-    });
+      now: at,
+      pid: Number.isInteger(target.pid) ? target.pid : (pid === undefined ? findAgentPid() : pid),
+    };
+    if (target.fileName) options.fileName = target.fileName;
+    return applySignals(target.agent, signals, options);
   } catch {
     return [];
   }
