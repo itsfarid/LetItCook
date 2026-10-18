@@ -49,13 +49,87 @@ function shortCwd(cwd) {
     return parts.slice(-2).join('/');
 }
 
+// Restrict a LetItCook-owned directory to owner-only (0700), querying and
+// setting attributes with NOFOLLOW_SYMLINKS so a link is never chmod-ed by path.
+function ensurePrivateDir(path) {
+    try {
+        const dirFile = Gio.File.new_for_path(path);
+        const flags = Gio.FileQueryInfoFlags.NOFOLLOW_SYMLINKS;
+        const attrs = 'standard::type,unix::mode,owner::user';
+        const info = dirFile.query_info(attrs, flags, null);
+        if (info.get_file_type() !== Gio.FileType.DIRECTORY ||
+            !info.has_attribute('unix::mode') ||
+            !info.has_attribute('owner::user') ||
+            info.get_attribute_string('owner::user') !== GLib.get_user_name())
+            return;
+        if ((info.get_attribute_uint32('unix::mode') & 0o777) === 0o700)
+            return;
+        if (!dirFile.set_attribute_uint32('unix::mode', 0o700, flags, null)) {
+            console.error(`[LetItCook] Could not restrict permissions on ${path}`);
+            return;
+        }
+        const secured = dirFile.query_info(attrs, flags, null);
+        if (secured.get_file_type() !== Gio.FileType.DIRECTORY ||
+            secured.get_attribute_string('owner::user') !== GLib.get_user_name() ||
+            (secured.get_attribute_uint32('unix::mode') & 0o777) !== 0o700)
+            console.error(`[LetItCook] Could not verify private permissions on ${path}`);
+    } catch (e) {
+        console.error(`[LetItCook] Could not restrict permissions on ${path}: ${e}`);
+    }
+}
+
+function ensurePrivateNotifyCacheFile(path) {
+    try {
+        if (GLib.file_test(path, GLib.FileTest.IS_SYMLINK))
+            return false;
+        if (!GLib.file_test(path, GLib.FileTest.EXISTS))
+            return true;
+
+        const file = Gio.File.new_for_path(path);
+        const attributes = 'standard::type,unix::mode,unix::nlink,owner::user';
+        const info = file.query_info(attributes, Gio.FileQueryInfoFlags.NOFOLLOW_SYMLINKS, null);
+        if (info.get_file_type() !== Gio.FileType.REGULAR ||
+            !info.has_attribute('unix::mode') ||
+            !info.has_attribute('unix::nlink') ||
+            !info.has_attribute('owner::user') ||
+            info.get_attribute_uint32('unix::nlink') !== 1 ||
+            info.get_attribute_string('owner::user') !== GLib.get_user_name())
+            return false;
+
+        if ((info.get_attribute_uint32('unix::mode') & 0o777) === 0o600)
+            return true;
+
+        // Replacement is atomic and does not follow a symlink at the target path.
+        const [ok, contents] = file.load_contents(null);
+        if (!ok) return false;
+        file.replace_contents(contents, null, false,
+            Gio.FileCreateFlags.REPLACE_DESTINATION | Gio.FileCreateFlags.PRIVATE, null);
+
+        const secured = file.query_info(attributes, Gio.FileQueryInfoFlags.NOFOLLOW_SYMLINKS, null);
+        return secured.get_file_type() === Gio.FileType.REGULAR &&
+            secured.has_attribute('unix::mode') &&
+            secured.has_attribute('unix::nlink') &&
+            secured.has_attribute('owner::user') &&
+            secured.get_attribute_uint32('unix::nlink') === 1 &&
+            secured.get_attribute_string('owner::user') === GLib.get_user_name() &&
+            (secured.get_attribute_uint32('unix::mode') & 0o777) === 0o600;
+    } catch (e) {
+        console.error(`[LetItCook] Could not secure notification cache ${path}: ${e}`);
+        return false;
+    }
+}
+
 const LetItCookButton = GObject.registerClass(
 class LetItCookButton extends PanelMenu.Button {
     _init() {
         super._init(0.0, 'LetItCook', false);
 
         this._stateDir = GLib.build_filenamev([GLib.get_user_state_dir(), 'letitcook', 'sessions']);
-        GLib.mkdir_with_parents(this._stateDir, 0o755);
+        GLib.mkdir_with_parents(this._stateDir, 0o700);
+        // Correct pre-existing directories created with broader permissions.
+        // Only LetItCook's own two directories are touched, never their parents.
+        ensurePrivateDir(GLib.path_get_dirname(this._stateDir));
+        ensurePrivateDir(this._stateDir);
 
         this._container = new St.BoxLayout({
             style_class: 'letitcook-panel-box',
@@ -84,6 +158,7 @@ class LetItCookButton extends PanelMenu.Button {
         this._debounceTimerId = null;
 
         this._notifyCacheFile = GLib.build_filenamev([GLib.get_user_state_dir(), 'letitcook', 'notify_cache.json']);
+        this._lastSavedCacheJson = null;
         this._notifyCache = this._loadNotifyCache();
         this._notifyDone = this._notifyCache._config && this._notifyCache._config.notifyDone === true;
         this._isFirstScan = true;
@@ -135,8 +210,9 @@ class LetItCookButton extends PanelMenu.Button {
         const sessions = [];
         const dirFile = Gio.File.new_for_path(this._stateDir);
 
+        let enumerator = null;
         try {
-            const enumerator = dirFile.enumerate_children('standard::name', Gio.FileQueryInfoFlags.NONE, null);
+            enumerator = dirFile.enumerate_children('standard::name', Gio.FileQueryInfoFlags.NONE, null);
             let info;
             const now = Date.now();
 
@@ -165,17 +241,15 @@ class LetItCookButton extends PanelMenu.Button {
                         }
 
                         let stale = false;
+                        let terminated = false;
                         const hasPid = pid !== null;
                         const isPidAlive = hasPid ? GLib.file_test(`/proc/${pid}`, GLib.FileTest.EXISTS) : true;
 
                         // Lifecycle check: terminated session removal
                         if (hasPid && !isPidAlive) {
                             if (status === STATUS.DONE || status === STATUS.BURN) {
-                                // Session completed/ended and process terminated -> remove state file and exclude
-                                try {
-                                    file.delete(null);
-                                } catch (e) {}
-                                continue;
+                                // Process terminated after reaching terminal state
+                                terminated = true;
                             } else if (status === STATUS.COOKING || status === STATUS.YOUR_TURN) {
                                 // Process died unexpectedly -> mark Unknown (crash)
                                 stale = true;
@@ -202,6 +276,7 @@ class LetItCookButton extends PanelMenu.Button {
                             stale,
                             confidence,
                             filePath,
+                            terminated,
                         });
                     }
                 } catch (e) {
@@ -217,11 +292,20 @@ class LetItCookButton extends PanelMenu.Button {
                         stale: true,
                         confidence: 'low',
                         filePath,
+                        terminated: false,
                     });
                 }
             }
         } catch (e) {
             console.error(`[LetItCook] Error reading sessions: ${e}`);
+        } finally {
+            if (enumerator) {
+                try {
+                    enumerator.close(null);
+                } catch (e) {
+                    console.error(`[LetItCook] Error closing enumerator: ${e}`);
+                }
+            }
         }
 
         // ponytail: sort by status priority desc then recency, upgrade when custom sort needed
@@ -237,13 +321,25 @@ class LetItCookButton extends PanelMenu.Button {
 
     _update() {
         const sessions = this._readSessions();
+        // Keep a just-terminated Done/Burn state visible through this update; the file is
+        // cleaned below, and the next scan naturally returns to Unknown.
         this._currentSessions = sessions;
         this._checkNotifications(sessions);
+
+        // Clean up terminated session files after notification evaluation
+        for (const s of sessions) {
+            if (s.terminated && s.filePath) {
+                try {
+                    const file = Gio.File.new_for_path(s.filePath);
+                    file.delete(null);
+                } catch (e) {}
+            }
+        }
 
         let dominant = STATUS.UNKNOWN;
         let maxPriority = 0;
 
-        for (const s of sessions) {
+        for (const s of this._currentSessions) {
             const meta = STATUS_META[s.status] || STATUS_META[STATUS.UNKNOWN];
             if (meta.priority > maxPriority) {
                 maxPriority = meta.priority;
@@ -259,7 +355,7 @@ class LetItCookButton extends PanelMenu.Button {
         }
         this._dot.add_style_class_name(`letitcook-dot-${dominant}`);
 
-        if (sessions.length === 0) {
+        if (this._currentSessions.length === 0) {
             this._label.text = 'LetItCook';
         } else {
             const meta = STATUS_META[dominant] || STATUS_META[STATUS.UNKNOWN];
@@ -274,6 +370,9 @@ class LetItCookButton extends PanelMenu.Button {
 
     _loadNotifyCache() {
         try {
+            if (!ensurePrivateNotifyCacheFile(this._notifyCacheFile)) {
+                return { _config: { notifyDone: false }, sessions: {} };
+            }
             const file = Gio.File.new_for_path(this._notifyCacheFile);
             if (file.query_exists(null)) {
                 const [ok, contents] = file.load_contents(null);
@@ -283,22 +382,36 @@ class LetItCookButton extends PanelMenu.Button {
                         if (!parsed.sessions || typeof parsed.sessions !== 'object') {
                             parsed.sessions = {};
                         }
+                        this._lastSavedCacheJson = JSON.stringify(parsed);
                         return parsed;
                     }
                 }
             }
         } catch (e) {}
-        return { _config: { notifyDone: false }, sessions: {} };
+        const fallback = { _config: { notifyDone: false }, sessions: {} };
+        this._lastSavedCacheJson = JSON.stringify(fallback);
+        return fallback;
     }
 
-    _saveNotifyCache() {
+    _saveNotifyCache(force = false) {
         try {
+            if (!ensurePrivateNotifyCacheFile(this._notifyCacheFile)) return;
             if (!this._notifyCache._config) this._notifyCache._config = {};
             this._notifyCache._config.notifyDone = this._notifyDone;
+            const serialized = JSON.stringify(this._notifyCache);
+            if (!force && serialized === this._lastSavedCacheJson) {
+                return;
+            }
             const file = Gio.File.new_for_path(this._notifyCacheFile);
-            const bytes = new TextEncoder().encode(JSON.stringify(this._notifyCache));
-            file.replace_contents(bytes, null, false, Gio.FileCreateFlags.REPLACE_DESTINATION, null);
-        } catch (e) {}
+            const bytes = new TextEncoder().encode(serialized);
+            file.replace_contents(bytes, null, false,
+                Gio.FileCreateFlags.REPLACE_DESTINATION | Gio.FileCreateFlags.PRIVATE, null);
+            this._lastSavedCacheJson = serialized;
+            if (!ensurePrivateNotifyCacheFile(this._notifyCacheFile))
+                console.error(`[LetItCook] Notification cache did not retain private permissions`);
+        } catch (e) {
+            console.error(`[LetItCook] Could not save notification cache: ${e}`);
+        }
     }
 
     _checkNotifications(sessions) {
@@ -363,11 +476,13 @@ class LetItCookButton extends PanelMenu.Button {
                 }
             } else {
                 const currentNotified = (s.status === STATUS.COOKING) ? null : (cached ? cached.notifiedStatus : null);
-                this._notifyCache.sessions[sid] = {
-                    lastStatus: s.status,
-                    notifiedStatus: currentNotified,
-                    notifiedAt: cached ? cached.notifiedAt : null,
-                };
+                if (!cached || cached.lastStatus !== s.status || cached.notifiedStatus !== currentNotified) {
+                    this._notifyCache.sessions[sid] = {
+                        lastStatus: s.status,
+                        notifiedStatus: currentNotified,
+                        notifiedAt: cached ? cached.notifiedAt : null,
+                    };
+                }
             }
         }
 
@@ -453,7 +568,7 @@ class LetItCookButton extends PanelMenu.Button {
         const doneNotifyItem = new PopupMenu.PopupSwitchMenuItem('Notify on Done', this._notifyDone);
         doneNotifyItem.connect('toggled', (item, state) => {
             this._notifyDone = state;
-            this._saveNotifyCache();
+            this._saveNotifyCache(true);
         });
         this.menu.addMenuItem(doneNotifyItem);
 
