@@ -63,12 +63,16 @@ export function parseModel(value) {
   return { providerID: value.slice(0, slash), modelID: value.slice(slash + 1) };
 }
 
-// Only the exact self-test command may be approved; everything else is rejected.
+// Only the exact self-test command may be approved; everything else is rejected. Besides
+// the permission patterns, the full command OpenCode will run (`metadata.command`) must be
+// exactly the self-test command whenever OpenCode provides it.
 export function isApprovedRequest(request) {
   const patterns = request && (request.patterns || request.resources);
+  const command = request?.metadata?.command;
   return Boolean(request) &&
     (request.permission || request.action) === 'bash' &&
-    Array.isArray(patterns) && patterns.length === 1 && patterns[0].trim() === SELFTEST_COMMAND;
+    Array.isArray(patterns) && patterns.length === 1 && patterns[0].trim() === SELFTEST_COMMAND &&
+    (command === undefined || (typeof command === 'string' && command.trim() === SELFTEST_COMMAND));
 }
 
 // First line of an agent-provided reason, without stack traces or control characters.

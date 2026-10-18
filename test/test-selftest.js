@@ -107,6 +107,9 @@ function testParseModel() {
 function testOnlyTheSelftestCommandIsApproved() {
   assert.strictEqual(isApprovedRequest({ permission: 'bash', patterns: [SELFTEST_COMMAND] }), true);
   assert.strictEqual(isApprovedRequest({ action: 'bash', resources: [SELFTEST_COMMAND] }), true, 'v2 shape');
+  assert.strictEqual(isApprovedRequest({ permission: 'bash', patterns: [SELFTEST_COMMAND], metadata: { command: SELFTEST_COMMAND } }), true, 'matching full command');
+  assert.strictEqual(isApprovedRequest({ permission: 'bash', patterns: [SELFTEST_COMMAND], metadata: { command: `cd /tmp && ${SELFTEST_COMMAND}` } }), false, 'full command differs from the pattern');
+  assert.strictEqual(isApprovedRequest({ permission: 'bash', patterns: [SELFTEST_COMMAND], metadata: { command: 42 } }), false, 'non-string command');
   for (const request of [
     null,
     { permission: 'bash', patterns: ['rm -rf /'] },
