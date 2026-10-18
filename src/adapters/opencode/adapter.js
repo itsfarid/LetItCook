@@ -368,15 +368,39 @@ export function deleteSessionFile(sessionId, baseDir) {
   } catch {}
 }
 
+// Removes exactly the file that was read, and only if it is still that file: a file
+// rewritten since it was read (new state from a live agent) is kept.
+function removeIfUnchanged(filePath, readStat) {
+  try {
+    const now = fs.lstatSync(filePath);
+    if (now.isFile() && now.dev === readStat.dev && now.ino === readStat.ino &&
+        now.size === readStat.size && now.mtimeMs === readStat.mtimeMs) {
+      fs.unlinkSync(filePath);
+    }
+  } catch {}
+}
+
+// Reads every session file in the state directory. Terminated sessions are pruned (their
+// own file is removed) unless `options.prune === false`, which read-only callers such as
+// the notification inspection CLI use. Symlinks and other non-regular files are skipped:
+// the writers only ever create regular files.
 export function readAllSessionsFromDir(baseDir, options = {}) {
   const targetDir = getSessionDir(baseDir);
   if (!fs.existsSync(targetDir)) return [];
+  const prune = options.prune !== false;
 
   const files = fs.readdirSync(targetDir).filter(f => f.endsWith('.json') && !f.startsWith('.'));
   const sessions = [];
 
   for (const file of files) {
     const fullPath = path.join(targetDir, file);
+    let stat;
+    try {
+      stat = fs.lstatSync(fullPath);
+    } catch {
+      continue;
+    }
+    if (!stat.isFile()) continue;
     try {
       const raw = fs.readFileSync(fullPath, 'utf8');
       const parsed = JSON.parse(raw);
@@ -385,7 +409,7 @@ export function readAllSessionsFromDir(baseDir, options = {}) {
       }
       const normalized = normalizeSession(parsed, options);
       if (normalized.terminated) {
-        deleteSessionFile(normalized.session_id, baseDir);
+        if (prune) removeIfUnchanged(fullPath, stat);
       } else {
         sessions.push(normalized);
       }
