@@ -11,9 +11,16 @@
 //
 // Every method validates the event and applies it through the shared bridge (same rules,
 // lock and file safety as the command). It never throws into the host CLI; it returns
-// `{ ok, error? }` for diagnostics (error codes only, never event values). Calls are
-// synchronous: a few milliseconds, up to 2 s when another writer holds the session's lock
-// (the event is then skipped, like with the command transport).
+// `{ ok: true }` when LetItCook applied the event, or `{ ok: false, error }` (codes only,
+// never event values) when it did not:
+//   - a schema error code (e.g. `reserved_agent`, `invalid_subject`) for an invalid event;
+//   - `ignored` when the state rules did not apply it: an outcome or request outside the
+//     declared capabilities, a late or duplicate event, activity on a finished turn;
+//   - `busy` when another writer held the session's lock for 2 s (the event is skipped);
+//   - `write_failed` when the state directory is unusable.
+// `requestOpened()` returns the request id only when the request was applied, else null:
+// the caller must not treat it as shown in the panel. Calls are synchronous: a few
+// milliseconds, up to 2 s while waiting for the lock.
 
 import { randomUUID } from 'node:crypto';
 import { applySignals } from '../hooks/bridge.js';
@@ -41,9 +48,12 @@ export function createReporter({
       const result = validateEvent(event, { now });
       if (!result.ok) return { ok: false, error: result.error };
       if (result.ignored) return { ok: false, error: result.ignored };
+      const outcomes = [];
       applySignals(agent, eventToSignals(result.event), {
-        stateDir: stateDir || getSessionDir(), now, pid, fileName: sid => protocolFileName(agent, sid),
+        stateDir: stateDir || getSessionDir(), now, pid, fileName: sid => protocolFileName(agent, sid), outcomes,
       });
+      if (outcomes.includes('busy')) return { ok: false, error: 'busy' };
+      if (outcomes.length === 0 || outcomes.includes('ignored')) return { ok: false, error: 'ignored' };
       return { ok: true };
     } catch {
       return { ok: false, error: 'write_failed' };

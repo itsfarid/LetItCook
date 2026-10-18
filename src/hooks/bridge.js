@@ -164,25 +164,33 @@ export function stateFileName(agent, sessionId) {
 // Applies an adapter's signals to the state directory. Returns the records written or
 // removed (for tests and diagnostics).
 // `fileName(sessionId)` names the session file (default `<agent>_<session>.json`); it must
-// derive the name from validated ids only, never from free input.
+// derive the name from validated ids only, never from free input. If `outcomes` is an
+// array, one entry per signal is appended: 'written' (state changed), 'unchanged' (applied,
+// nothing new to write), 'ignored' (rejected by the state rules: invalid, late,
+// duplicate, undeclared capability) or 'busy' (lock not taken; skipped).
 export function applySignals(agent, signals, {
   stateDir = getSessionDir(), now = Date.now(), pid = null, lockTimeoutMs = LOCK_TIMEOUT_MS,
-  fileName = sessionId => stateFileName(agent, sessionId),
+  fileName = sessionId => stateFileName(agent, sessionId), outcomes = null,
 } = {}) {
+  const note = outcome => { if (Array.isArray(outcomes)) outcomes.push(outcome); };
   const results = [];
   if (!Array.isArray(signals) || signals.length === 0) return results;
   ensurePrivateDir(stateDir);
   for (const signal of signals) {
-    if (!signal || !isValidSessionId(signal.sessionId)) continue;
+    if (!signal || !isValidSessionId(signal.sessionId)) { note('ignored'); continue; }
     const name = fileName(signal.sessionId);
-    if (typeof name !== 'string' || !name.endsWith('.json') || name !== path.basename(name) || name.startsWith('.')) continue;
+    if (typeof name !== 'string' || !name.endsWith('.json') || name !== path.basename(name) || name.startsWith('.')) {
+      note('ignored');
+      continue;
+    }
     const filePath = path.join(stateDir, name);
     const release = acquireLock(path.join(stateDir, `.${name}.lock`), { timeoutMs: lockTimeoutMs });
-    if (!release) continue;
+    if (!release) { note('busy'); continue; }
     try {
       const prev = readStateFile(filePath, { sessionId: signal.sessionId, agent });
       const next = reduceSession(prev, signal, { agent, now, pid });
-      if (!next || !shouldPersist(prev, next)) continue;
+      if (!next) { note('ignored'); continue; }
+      if (!shouldPersist(prev, next)) { note('unchanged'); continue; }
       if (next.deleted) {
         try {
           if (fs.lstatSync(filePath).isFile()) fs.unlinkSync(filePath);
@@ -190,6 +198,7 @@ export function applySignals(agent, signals, {
       } else {
         writeStateFile(stateDir, filePath, next);
       }
+      note('written');
       results.push(next);
     } finally {
       release();
