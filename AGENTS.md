@@ -876,7 +876,7 @@ Current adapter support (2026-10-07, verified on this machine):
 |---|---|---|---|
 | OpenCode | 1.18.35 | **Supported** | Official plugin (`event`, `tool.execute.before/after`) writes state files |
 | GitHub Copilot CLI | 1.0.92 | **Supported** | Documented session-event log (`~/.copilot/session-state/*/events.jsonl` + `workspace.yaml`), replayed by adapter; `src/sync.js` bridges to state dir |
-| Claude Code | 2.1.284 | Detected but unsupported | Has native hooks (`PreToolUse` etc.) + JSONL transcripts; recommended next adapter |
+| Claude Code | 2.1.295 | **Supported (fixture-tested only)** | Official command hooks → `src/hooks/hook.js claude` → shared lifecycle contract; see `docs/adapters.md` |
 | Gemini CLI | 0.56.0 | Detected but unsupported | Has `gemini hooks` management; candidate after Claude |
 | Codex CLI | 0.147.0 | Detected but unsupported | Sessions + sqlite state observed; hook/notify mechanism needs research |
 | Goose | 1.46.0 | Detected but unsupported | No hook mechanism found yet; recipes only |
