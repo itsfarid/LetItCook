@@ -44,6 +44,10 @@ const MAX_CWD = 4096;
 const MAX_REQUEST_ID = 128;
 const MAX_PENDING = 32;
 const MAX_CLOSED = 32;
+const MAX_SEEN = 64;
+// Event and turn ids (optional; sent by the generic protocol, not by native adapters).
+const ID_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
+const TURN_ENDING = [SIGNAL.TURN_COMPLETE, SIGNAL.TURN_END, SIGNAL.FAILURE, SIGNAL.CANCEL];
 
 // Same rate limit as the OpenCode plugin: a session whose state did not change is
 // rewritten at most this often while it is active, to prove it is still alive.
@@ -75,6 +79,16 @@ export function validateSignal(signal) {
   if (signal.parentSessionId !== undefined) {
     if (!isValidSessionId(signal.parentSessionId)) return null;
     clean.parentSessionId = signal.parentSessionId;
+  }
+  // Optional ordering metadata: present but invalid rejects the signal.
+  for (const key of ['eventId', 'turnId']) {
+    if (signal[key] === undefined) continue;
+    if (typeof signal[key] !== 'string' || !ID_RE.test(signal[key])) return null;
+    clean[key] = signal[key];
+  }
+  if (signal.at !== undefined) {
+    if (!Number.isSafeInteger(signal.at) || signal.at <= 0) return null;
+    clean.at = signal.at;
   }
   return clean;
 }
@@ -108,13 +122,28 @@ export function reduceSession(prev, signal, context = {}) {
   const lifecycle = (prev && prev.lifecycle) || {};
   let pending = { ...(lifecycle.pending || {}) };
   let closed = Array.isArray(lifecycle.closed) ? lifecycle.closed.slice(-MAX_CLOSED) : [];
+  const seen = Array.isArray(lifecycle.seen) ? lifecycle.seen.slice(-MAX_SEEN) : [];
+  let turn = typeof lifecycle.turn === 'string' ? lifecycle.turn : undefined;
+  let turnAt = Number.isSafeInteger(lifecycle.turnAt) ? lifecycle.turnAt : undefined;
   let status = prev ? prev.status : null;
   let reason = prev ? prev.reason : '';
   const settled = status === STATUS.DONE || status === STATUS.BURN;
 
   // A subagent's end of turn, failure or cancellation is activity of its parent.
-  const ending = [SIGNAL.TURN_COMPLETE, SIGNAL.TURN_END, SIGNAL.FAILURE, SIGNAL.CANCEL];
-  const type = s.subagent && ending.includes(s.type) ? SIGNAL.ACTIVITY : s.type;
+  const type = s.subagent && TURN_ENDING.includes(s.type) ? SIGNAL.ACTIVITY : s.type;
+  const turnLevel = type === SIGNAL.TURN_START || TURN_ENDING.includes(type);
+
+  // Ordering (only for signals that carry ids or times):
+  // - an event id already applied is a duplicate;
+  // - a turn-ending event or a request for another turn than the current one is late;
+  // - a turn start or end older than the last applied one is late.
+  if (s.eventId && seen.includes(s.eventId)) return null;
+  if (s.turnId && turn && s.turnId !== turn && (TURN_ENDING.includes(type) || type === SIGNAL.REQUEST_OPEN)) return null;
+  if (turnLevel && s.at && turnAt && s.at < turnAt) return null;
+  if (turnLevel) {
+    if (type === SIGNAL.TURN_START) turn = s.turnId;
+    if (s.at) turnAt = s.at;
+  }
 
   switch (type) {
     case SIGNAL.TURN_START:
@@ -194,6 +223,10 @@ export function reduceSession(prev, signal, context = {}) {
     confidence: 'high',
     lifecycle: { pending, closed },
   };
+  if (s.eventId) record.lifecycle.seen = [...seen, s.eventId].slice(-MAX_SEEN);
+  else if (seen.length) record.lifecycle.seen = seen;
+  if (turn) record.lifecycle.turn = turn;
+  if (turnAt) record.lifecycle.turnAt = turnAt;
   const parent = s.parentSessionId || (prev && prev.parent_session_id);
   if (parent) record.parent_session_id = parent;
   return record;
@@ -206,7 +239,10 @@ export function shouldPersist(prev, next, heartbeatMs = HEARTBEAT_MS) {
   if (!prev || next.deleted) return true;
   const fields = ['status', 'reason', 'title', 'cwd', 'pid', 'parent_session_id'];
   if (fields.some(f => prev[f] !== next[f])) return true;
-  if (JSON.stringify(prev.lifecycle || {}) !== JSON.stringify(next.lifecycle || {})) return true;
+  // The record of applied event ids alone is not worth a write: re-applying an event whose
+  // id was not persisted changes nothing (it was a no-op or idempotent activity).
+  const bookkeeping = ({ seen, ...rest } = {}) => JSON.stringify(rest);
+  if (bookkeeping(prev.lifecycle) !== bookkeeping(next.lifecycle)) return true;
   const active = next.status === STATUS.COOKING || next.status === STATUS.YOUR_TURN;
   return active && !(next.updated_at - prev.updated_at < heartbeatMs);
 }

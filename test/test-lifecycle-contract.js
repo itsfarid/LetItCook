@@ -147,6 +147,60 @@ function testDuplicateAndReorderedRequests() {
   assert.ok(many.lifecycle.closed.length <= 32, 'resolved-request memory is bounded');
 }
 
+// Optional ordering metadata (event ids, turn ids, producer times) used by the generic
+// protocol. Native adapters do not send it and are unaffected.
+function testEventOrderingMetadata() {
+  // Duplicate event ids are ignored, also for state-changing events.
+  const dup = run([
+    { type: SIGNAL.TURN_START, eventId: 'e1', turnId: 't1', at: 100 },
+    { type: SIGNAL.TURN_COMPLETE, eventId: 'e2', turnId: 't1', at: 200 },
+    { type: SIGNAL.TURN_START, eventId: 'e3', turnId: 't2', at: 300 },
+    { type: SIGNAL.TURN_COMPLETE, eventId: 'e2', turnId: 't2', at: 400 },
+  ]).state;
+  assert.strictEqual(dup.status, STATUS.COOKING, 'a replayed event id does not complete the new turn');
+
+  // A completion of the previous turn arriving late does not complete the current one.
+  const lateTurn = run([
+    { type: SIGNAL.TURN_START, eventId: 'a', turnId: 't1', at: 100 },
+    { type: SIGNAL.TURN_START, eventId: 'b', turnId: 't2', at: 300 },
+    { type: SIGNAL.TURN_COMPLETE, eventId: 'c', turnId: 't1', at: 200 },
+    { type: SIGNAL.FAILURE, eventId: 'd', turnId: 't1', at: 250 },
+    { type: SIGNAL.REQUEST_OPEN, eventId: 'e', turnId: 't1', requestId: 'r-old' },
+  ]).state;
+  assert.strictEqual(lateTurn.status, STATUS.COOKING, 'late outcome and request of turn t1 are ignored');
+  assert.strictEqual(lateTurn.lifecycle.turn, 't2');
+
+  // Without turn ids, producer times still order turn starts and endings.
+  const lateStart = run([
+    { type: SIGNAL.TURN_START, eventId: 'a', at: 100 },
+    { type: SIGNAL.TURN_COMPLETE, eventId: 'b', at: 300 },
+    { type: SIGNAL.TURN_START, eventId: 'c', at: 200 },
+  ]).state;
+  assert.strictEqual(lateStart.status, STATUS.DONE, 'a turn start older than the completion does not reopen the turn');
+
+  // Requests and activity are not dropped for being older (parallel hooks).
+  const parallel = run([
+    { type: SIGNAL.TURN_START, eventId: 'a', turnId: 't1', at: 100 },
+    { type: SIGNAL.ACTIVITY, eventId: 'b', at: 300 },
+    { type: SIGNAL.REQUEST_OPEN, eventId: 'c', turnId: 't1', requestId: 'r1', at: 200 },
+  ]).state;
+  assert.strictEqual(parallel.status, STATUS.YOUR_TURN, 'an older request of the current turn still shows');
+
+  // Invalid metadata rejects the signal; absent metadata is fine.
+  for (const bad of [{ eventId: '../x' }, { eventId: 7 }, { turnId: '' }, { at: -1 }, { at: 1.5 }, { at: '100' }]) {
+    assert.strictEqual(reduceSession(null, { type: SIGNAL.TURN_START, sessionId: SID, ...bad }, ctx()), null, `rejects ${JSON.stringify(bad)}`);
+  }
+
+  // Bounded memory of applied ids.
+  const many = run(Array.from({ length: 200 }, (_, i) => ({ type: SIGNAL.ACTIVITY, eventId: `e${i}` }))).state;
+  assert.ok(many.lifecycle.seen.length <= 64);
+
+  // Recording an applied id alone is not worth a write.
+  const a = reduceSession(null, { type: SIGNAL.TURN_START, sessionId: SID, eventId: 'x1' }, ctx(1000));
+  const b = reduceSession(a, { type: SIGNAL.ACTIVITY, sessionId: SID, eventId: 'x2', reason: 'prompt submitted' }, ctx(2000));
+  assert.strictEqual(shouldPersist(a, b), false);
+}
+
 function testSubagentsNeverSettleTheParent() {
   for (const type of [SIGNAL.TURN_COMPLETE, SIGNAL.TURN_END, SIGNAL.FAILURE, SIGNAL.CANCEL, SIGNAL.SESSION_END]) {
     const { state } = run([{ type: SIGNAL.TURN_START }, { type, subagent: true }]);
@@ -193,6 +247,7 @@ function run_() {
   testTerminalStatesResistLateEvents();
   testRequestsAreNotHiddenByActivity();
   testDuplicateAndReorderedRequests();
+  testEventOrderingMetadata();
   testSubagentsNeverSettleTheParent();
   testSessionEndNeverCompletes();
   testSessionsAreIsolated();
