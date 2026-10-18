@@ -259,7 +259,7 @@ export function runConformance(spec) {
       process.env.HOME = home;
       for (const key of spec.binEnv || []) delete process.env[key];
       const adapter = spec.createAdapter();
-      assert.strictEqual(adapter.id, spec.id, label('registry adapter id'));
+      assert.strictEqual(adapter.id, spec.adapterId || spec.id, label('registry adapter id'));
       assert.strictEqual(adapter.isAvailable(), false, label('reported available without an installation'));
     } finally {
       process.env.PATH = saved.PATH;
