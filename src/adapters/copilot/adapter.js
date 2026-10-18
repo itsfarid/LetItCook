@@ -35,7 +35,12 @@ export function parseWorkspaceYaml(content) {
 
 const REQUEST_OPENED = new Set(['permission.requested', 'user_input.requested', 'elicitation.requested']);
 const REQUEST_RESOLVED = new Set(['permission.completed', 'user_input.completed', 'elicitation.completed']);
-const TURN_SETTLED = new Set(['assistant.turn_end', 'session.task_complete', 'session.error', 'abort', 'session.shutdown']);
+// Events after which no earlier request can still be waiting: the turn settled, or a new
+// session or turn started (e.g. resumed after the terminal was killed mid-request).
+const TURN_SETTLED = new Set([
+  'assistant.turn_end', 'session.task_complete', 'session.error', 'abort', 'session.shutdown',
+  'session.start', 'session.resume', 'assistant.turn_start', 'model.turn_started',
+]);
 
 // Requests (permission, input, elicitation) still waiting for the user, keyed by request
 // id. Copilot runs tools in parallel, so activity of another tool must not hide one;
