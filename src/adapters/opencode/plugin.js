@@ -4,6 +4,7 @@ import {
   writeSessionFile,
   deleteSessionFile,
   hasMeaningfulStateChange,
+  isHeartbeatDue,
   extractSessionId,
 } from './adapter.js';
 
@@ -28,7 +29,7 @@ export const LetItCookPlugin = async (ctx) => {
         return;
       }
 
-      if (!hasMeaningfulStateChange(prev, mapped)) {
+      if (!hasMeaningfulStateChange(prev, mapped) && !isHeartbeatDue(prev, mapped)) {
         return;
       }
 
@@ -42,7 +43,7 @@ export const LetItCookPlugin = async (ctx) => {
       if (!sid || sid === 'global') return;
       const prev = activeSessions.get(sid) || null;
       const mapped = mapToolHook('before', input, prev);
-      if (!mapped || !hasMeaningfulStateChange(prev, mapped)) {
+      if (!mapped || (!hasMeaningfulStateChange(prev, mapped) && !isHeartbeatDue(prev, mapped))) {
         return;
       }
       activeSessions.set(sid, mapped);
@@ -55,7 +56,7 @@ export const LetItCookPlugin = async (ctx) => {
       if (!sid || sid === 'global') return;
       const prev = activeSessions.get(sid) || null;
       const mapped = mapToolHook('after', input, prev);
-      if (!mapped || !hasMeaningfulStateChange(prev, mapped)) {
+      if (!mapped || (!hasMeaningfulStateChange(prev, mapped) && !isHeartbeatDue(prev, mapped))) {
         return;
       }
       activeSessions.set(sid, mapped);
