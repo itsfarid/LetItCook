@@ -34,9 +34,10 @@ When a supported agent requires user interaction, LetItCook can display a GNOME 
 |---|---|---|
 | OpenCode | ✅ Supported | Official plugin events (event, tool.execute.before/after hooks) writing to state dir |
 | GitHub Copilot CLI | ✅ Supported | Session-event log replay (`~/.copilot/session-state/*/events.jsonl` + `workspace.yaml`) via polling |
-| Claude Code, Gemini CLI, Codex CLI, Goose | ⚠️ Detected but unsupported | No adapter yet |
+| Claude Code | 🧪 New, fixture-tested only | Official command hooks (`UserPromptSubmit`, tool, permission, `Stop`/`StopFailure`, subagent and session events) |
+| Gemini CLI, Codex CLI, Goose | ⚠️ Detected but unsupported | No adapter yet |
 
-See [AGENTS.md §28](AGENTS.md#28-agent-adapter-status) for per-state reliability notes and scope limitations.
+See [docs/adapters.md](docs/adapters.md) for how each agent's events map to the states, what each one cannot report, and how adapters are tested. [AGENTS.md §28](AGENTS.md#28-agent-adapter-status) has the per-state reliability notes.
 
 ## Installation
 
@@ -111,7 +112,19 @@ It starts a private, password-protected OpenCode server on `127.0.0.1` in a temp
 gnome-extensions uninstall letitcook@letitcook.local
 ```
 
-Then remove the plugin entry from your OpenCode config, stop any `src/sync.js --watch` process, and optionally delete `~/.local/state/letitcook/`.
+Then remove the plugin entry from your OpenCode config and the LetItCook entries from your Claude Code settings, stop any `src/sync.js --watch` process, and optionally delete `~/.local/state/letitcook/`.
+
+### Claude Code setup (if using Claude Code)
+
+Claude Code reports state through [command hooks](https://code.claude.com/docs/en/hooks). Print the settings block for your clone:
+
+```bash
+node src/hooks/hook.js --print-config claude
+```
+
+Review it, then merge its `hooks` entries into `~/.claude/settings.json`. LetItCook never edits the file for you. Each hook runs `node src/hooks/hook.js claude`, using absolute paths to your Node.js binary and your clone, so keep the clone where it is. The hook prints nothing and always exits 0, so it does not change what Claude Code does. It adds about 70 ms per event. Restart Claude Code (or check with `/hooks`) and start a prompt: a `claude_<session>.json` file should appear in `~/.local/state/letitcook/sessions/`.
+
+To disable it, remove those entries. `"disableAllHooks": true` turns off all hooks. Hooks run with your user's permissions; read the block before adding it.
 
 ### Copilot CLI setup (if using GitHub Copilot CLI)
 
@@ -127,7 +140,7 @@ For persistent operation, run it as a systemd user service or Cron job.
 
 | Path | Data | Generated / User-editable | Safe to delete |
 |---|---|---|---|
-| `~/.local/state/letitcook/sessions/` | Session state files (`{session_id}.json`, `copilot_{session_id}.json`) | Generated on first start | Sessions are recreated from adapter sources |
+| `~/.local/state/letitcook/sessions/` | Session state files (`{session_id}.json`, `copilot_{session_id}.json`, `claude_{session_id}.json`) | Generated on first start | Sessions are recreated from adapter sources |
 | `~/.local/state/letitcook/notify_cache.json` | Notification state (deduplication, notify-on-Done toggle) | Generated on first start | Deleting it resets notification state (opt-out) |
 | `~/.copilot/` | Copilot CLI state | Copilot-generated | Do not delete Copilot state unless you want to restart Copilot completely |
 
@@ -168,6 +181,8 @@ These describe current behavior and have not all been confirmed in day-to-day us
 - **OpenCode, long single steps**: while OpenCode keeps emitting events (for example streamed tool output), the plugin refreshes the session at most once a minute, so it stays `Cooking`. A step that runs longer than 5 minutes *without any events* still shows as `Unknown` until the next change.
 - **Copilot CLI**: every `assistant.turn_end` maps to `Your Turn`, so each finished turn notifies. `Done` requires `session.task_complete`, which is rare.
 - **Copilot CLI**: state only updates while `node src/sync.js --watch` is running.
+- **Claude Code**: pressing Esc while the model is thinking (no tool running) fires no hook, so the session stays `Cooking` and becomes `Unknown` after 5 minutes. Esc while a tool runs shows `Your Turn`.
+- **Claude Code**: denying a permission in the dialog fires no hook. The session stays `Your Turn` (the turn has stopped) until your next prompt.
 - **Copilot CLI**: Copilot records no process id, so the sync bridge stops showing a session (including `Your Turn`) one hour after its last event. Only `Cooking` sessions are kept longer, until they go stale.
 
 ## Notifications
@@ -236,6 +251,7 @@ node src/notify.js --test          # - Send one manual test notification via not
 ### Implementation notes
 
 - OpenCode writes state files directly via its plugin hooks (`event`, `tool.execute.before/after`). No CLI bridge needed.
+- Claude Code runs `node src/hooks/hook.js claude` for each hook event. The shared hook bridge maps the event through the adapter and the shared lifecycle contract into the state directory (see [docs/adapters.md](docs/adapters.md)).
 - Copilot CLI is poll-based. `node src/sync.js` repeatedly replays its session-event log into the state directory. The Copilot adapter cannot push; the polling script bridges to the shared state dir.
 - GNOME monitors state directory changes (directory monitor) and falls back to periodic polling (2-second interval).
 - Notifications are evaluated per-session with state transitions (from last-seen status).
