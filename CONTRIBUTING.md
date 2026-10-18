@@ -10,7 +10,7 @@ git clone https://github.com/itsfarid/LetItCook.git
 cd LetItCook
 
 # 2. Verify environment
-node --version  # >= 20.0.0
+node --version  # >= 20.3
 gnome-shell --version  # 42–47
 
 # 3. Run tests locally (no install required)
@@ -111,6 +111,7 @@ Then restart GNOME Shell so it loads the new code. On X11, press Alt + F2, type 
 ### 5. Self-check before committing
 
 - All test suites pass: `npm test`.
+- CI (`.github/workflows/test.yml`) runs syntax checks and `npm test` on Node 20, 22 and 24, and packs both extension variants. It does not run GNOME Shell, so check visible behaviour on a real desktop.
 - No unintended side effects (race conditions, missed edge cases).
 - No new dependencies beyond Node.js stdlib and existing agents.
 - No private data in log output or tests.
