@@ -295,6 +295,8 @@ function testCopilotSyncFreshness() {
       { type: 'session.task_complete', data: { success: true, summary: 'old' } });
     // Stale Cooking (10 min, default staleMs 5min) -> skipped
     mkSession('stale_cooking', 10 * 60 * 1000, null);
+    // Your Turn waiting 10 min -> still synced as Your Turn (not stale)
+    mkSession('waiting_turn_end', 10 * 60 * 1000, { type: 'assistant.turn_end', data: {} });
     // Your Turn left 3h ago (no shutdown, e.g. killed terminal) -> skipped
     mkSession('ancient_turn_end', 3 * 60 * 60 * 1000, { type: 'assistant.turn_end', data: {} });
 
@@ -304,6 +306,8 @@ function testCopilotSyncFreshness() {
     assert.ok(ids.includes('recent_done'), 'recent Done is synced');
     assert.ok(!ids.includes('ancient_done'), 'ancient Done is skipped');
     assert.ok(!ids.includes('stale_cooking'), 'stale Cooking is skipped');
+    assert.strictEqual(synced.find(s => s.session_id === 'waiting_turn_end')?.status, STATUS.YOUR_TURN,
+      'a waiting Your Turn is synced as Your Turn');
     assert.ok(!ids.includes('ancient_turn_end'), 'Your Turn older than maxAgeMs is skipped');
     assert.ok(fs.existsSync(path.join(tmpState, 'copilot_recent_done.json')));
     assert.ok(!fs.existsSync(path.join(tmpState, 'copilot_ancient_done.json')));
@@ -358,7 +362,9 @@ function testReplayCacheTracksChanges() {
 
     // Staleness still follows the clock on cached sessions.
     const later = adapter.detectSessions({ copilotDir: root, now: Date.now() + 10 * 60 * 1000 });
-    assert.ok(later.every(x => x.status === STATUS.UNKNOWN && x.stale), 'cached sessions still go stale over time');
+    const byId = Object.fromEntries(later.map(x => [x.session_id, x]));
+    assert.ok(byId['cache-c'].status === STATUS.UNKNOWN && byId['cache-c'].stale, 'cached Cooking sessions still go stale over time');
+    assert.ok(byId['cache-a'].status === STATUS.YOUR_TURN && !byId['cache-a'].stale, 'a cached Your Turn does not time out');
   } finally {
     fs.readFileSync = originalRead;
     fs.rmSync(root, { recursive: true, force: true });

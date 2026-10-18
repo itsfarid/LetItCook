@@ -54,14 +54,23 @@ function testNormalizeSingleSession() {
   assert.strictEqual(staleCooking.status, STATUS.UNKNOWN);
   assert.strictEqual(staleCooking.stale, true);
 
-  // 5. Stale Your Turn -> Unknown
-  const staleYourTurn = normalizeSession({
-    session_id: 's4',
-    status: STATUS.YOUR_TURN,
-    updated_at: now - 350000,
-  }, { now, staleMs: 300000 });
-  assert.strictEqual(staleYourTurn.status, STATUS.UNKNOWN);
-  assert.strictEqual(staleYourTurn.stale, true);
+  // 5. An unanswered Your Turn does not time out to Unknown (live or unknown process)
+  for (const extra of [{}, { pid: 4242 }]) {
+    const waitingYourTurn = normalizeSession({
+      session_id: 's4',
+      status: STATUS.YOUR_TURN,
+      updated_at: now - 6 * 60 * 60 * 1000,
+      ...extra,
+    }, { now, staleMs: 300000, isPidAlive: () => true });
+    assert.strictEqual(waitingYourTurn.status, STATUS.YOUR_TURN, 'an unanswered Your Turn stays Your Turn');
+    assert.strictEqual(waitingYourTurn.stale, false);
+  }
+  // ...but its process exiting is evidence it can no longer be answered -> Unknown
+  const orphanedYourTurn = normalizeSession({
+    session_id: 's4', status: STATUS.YOUR_TURN, updated_at: now - 1000, pid: 4242,
+  }, { now, staleMs: 300000, isPidAlive: () => false });
+  assert.strictEqual(orphanedYourTurn.status, STATUS.UNKNOWN);
+  assert.strictEqual(orphanedYourTurn.stale, true);
 
   // 6. Done is not invalidated by staleness
   const oldDone = normalizeSession({

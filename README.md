@@ -156,7 +156,7 @@ The indicator shows which agent most needs your attention:
 - `Unknown` is **not automatically** treated as `Done`. If we cannot reliably determine the state, we postpone the decision.
 - `Done` requires explicit session/task-complete events. Idle sessions without prior completion candidates are reported as `Unknown`.
 - Any agent disappearance (dead PID, missing state) reveals `Unknown`, never an assumed `Done`. A session whose process has exited is shown as `Unknown` for up to one hour after its last update, then removed from the panel. A session that reached `Done` or `Burn` is removed as soon as its process exits.
-- A `Cooking` or `Your Turn` session with no new state for 5 minutes is shown as `Unknown` (stale). This includes a permission prompt left unanswered for more than 5 minutes; the `Your Turn` notification has already been shown by then.
+- A `Cooking` session with no new state for 5 minutes is shown as `Unknown` (stale). A `Your Turn` session does not time out: a permission prompt or question stays `Your Turn` until it is answered, the session ends, or its process exits (then `Unknown`).
 - Multiple simultaneous sessions: the most urgent/active session determines the panel indicator.
 
 ### Known limitations
@@ -168,6 +168,7 @@ These describe current behavior and have not all been confirmed in day-to-day us
 - **OpenCode, long single steps**: while OpenCode keeps emitting events (for example streamed tool output), the plugin refreshes the session at most once a minute, so it stays `Cooking`. A step that runs longer than 5 minutes *without any events* still shows as `Unknown` until the next change.
 - **Copilot CLI**: every `assistant.turn_end` maps to `Your Turn`, so each finished turn notifies. `Done` requires `session.task_complete`, which is rare.
 - **Copilot CLI**: state only updates while `node src/sync.js --watch` is running.
+- **Copilot CLI**: Copilot records no process id, so the sync bridge stops showing a session (including `Your Turn`) one hour after its last event. Only `Cooking` sessions are kept longer, until they go stale.
 
 ## Notifications
 
