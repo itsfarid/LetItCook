@@ -21,6 +21,7 @@ agent ──event──▶ adapter ──normalized session JSON──▶ state 
 - The **state directory** (`$XDG_STATE_HOME/letitcook/sessions`) is the only interface to the GNOME extension. Each session is one JSON file with `session_id`, `agent`, `status`, `reason`, `title`, `cwd`, `pid`, `created_at` and `updated_at`. The extension is agent-agnostic: it reads every regular `*.json` file and applies the same staleness and process-exit rules to all of them (`normalizeSession` in `src/core/status.js`, mirrored in both extension variants).
 - **OpenCode** pushes state from an in-process plugin (`src/adapters/opencode/plugin.js`).
 - **Copilot CLI** is replayed from its event log by `node src/sync.js --watch` (`src/adapters/copilot/adapter.js`).
+- **Producers of the event protocol** run `node src/hooks/hook.js event` (or use `src/protocol/sdk.js`); see [protocol.md](protocol.md). Their sessions are `@<agent>.<session>.json`.
 - **Hook-based agents** (Claude Code, Codex CLI, Gemini CLI) run `node src/hooks/hook.js <agent>` for each hook event. The event JSON arrives on stdin, and the hook writes `<agent>_<session>.json`.
 
 ### Hook-based adapters
@@ -158,25 +159,34 @@ Goose 1.46 has documented lifecycle hooks: Open Plugins, `~/.agents/plugins/<nam
 
 A Goose adapter becomes reasonable once Goose exposes a hook for approval requests, or if LetItCook could reliably limit the adapter to the fully automatic mode.
 
-## A generic event protocol (evaluated, deferred)
+## Integration categories
 
-Another option was a documented local JSON protocol that any agent could write to without adapter code. It is deferred:
+| Category | When | Status in LetItCook |
+|---|---|---|
+| **Native adapter** | The agent has official hooks or event logs with its own semantics | OpenCode, Copilot CLI, Claude Code, Codex CLI, Gemini CLI |
+| **Event protocol** ([docs/protocol.md](protocol.md)) | A plugin, wrapper or the CLI itself can emit normalized events | Implemented; tested with the reference producer only |
+| **Limited detection** | Only process or terminal output | Not offered: such evidence cannot support the states |
 
-- **Adapters are already small.** Every agent evaluated here exposes its own hook payloads, not a format LetItCook could prescribe. Supporting such an agent takes a short pure `toSignals` mapping on top of the shared bridge, contract and conformance suite, with no change to the core.
-- **It would only move the mapping.** It helps an agent that can emit LetItCook signals itself, and no such agent exists yet. Building it now would be the kind of speculative feature AGENTS.md rules out.
-- **It would add a trust surface.** That means another input format to version, validate and support, and a decision about which local senders to trust.
+Every adapter, whatever its category, declares the outcomes it can report (`capabilities`: `requests`, `complete`, `fail`, `cancel`). The conformance suite checks each declaration against the adapter's events.
 
-If an agent needs it later, the smallest safe form would be a `generic` hook adapter:
-- **Transport:** stdin of `src/hooks/hook.js`, with no listening socket and no new IPC.
-- **Payload:** one JSON object `{ "schema": 1, "type": <signal>, "session_id", "request_id"?, "parent_session_id"?, "reason"?, "cwd"? }`.
-- **Validation:** checked by `validateSignal`, with unknown schemas and types ignored.
-- **Trust:** the same as the hooks, since the sender is a command the user configured, running as the user, writing to the user's private state directory.
-- **Ordering:** duplicate and out-of-order handling as in the contract above.
-- **Content:** no field is ever executed.
-- **Tests:** a sample producer, plus a spec in the conformance suite.
+### Candidate CLIs (evaluated, not integrated)
+
+These were evaluated as test cases for the protocol, from their official documentation and, for Cline, its installed package. None has been integrated or tested with LetItCook.
+
+| CLI | Mechanism found | Can support | Missing |
+|---|---|---|---|
+| Qwen Code | Command hooks similar to Claude Code's (`UserPromptSubmit`, tool events, `PermissionRequest`, `Stop`, `StopFailure`, `SessionEnd`) | Cooking, Your Turn, Burn; Done only if "Stop without StopFailure" means success (undocumented) | A cancel event; per-event compatibility details |
+| Cline CLI (3.0.60 installed) | File hooks named after events, with its own payload (`TaskStart`, `TaskComplete`, `TaskError`, `TaskCancel`, tool events) | Cooking, Done, Burn, cancel | No event when it waits for approval, so no Your Turn |
+| Cursor CLI | `hooks.json` with `stop` reporting `completed`/`aborted`/`error` | Done, Burn, cancel | No event for a waiting approval; reports say the CLI fires only some hooks |
+| Amp | Plugin API with `agent.end` reporting `done`/`error`/`cancelled` | Cooking, Done, Burn, cancel | No event for a waiting approval |
+| Aider | `--notifications-command` when it waits for input | A turn end without outcome (`turn.ended`) | Everything else |
+| Crush | Preliminary hooks, `PreToolUse` only | Cooking | Everything else |
+
+Qwen Code is the closest to a native adapter; Cline, Cursor and Amp suit the event protocol through a plugin or hook script, minus Your Turn; Aider and Crush are limited detection.
 
 ## Adding an adapter
 
+0. **Consider the event protocol first.** If you control a plugin, wrapper or the CLI itself, emit [protocol events](protocol.md) instead: no LetItCook code is needed. Write a native adapter only for an agent's own official hooks.
 1. **Research.** Read the agent's documented lifecycle mechanism and record, for each state, the event that proves it. Keep verified facts and assumptions apart. If no trustworthy event exists for a state, do not emit that state.
 2. **Write the mapping.** Add `src/adapters/<agent>/hooks.js` with a pure `toSignals(input)`. Read only identifiers from the input, never prompts, tool inputs or outputs, or messages.
 3. **Register it.** Add it to `src/hooks/adapters.js` and to `createDefaultRegistry()` (`src/core/registry.js`).
