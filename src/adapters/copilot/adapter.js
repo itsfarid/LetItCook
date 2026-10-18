@@ -230,7 +230,8 @@ export function mapCopilotEvent(event, previousState = null) {
   };
 }
 
-// Replays a session directory into its raw (not yet normalized) state.
+// Replays a session directory into its raw (not yet normalized) state, together with the
+// validated session id (events may carry a different, invalid one).
 function replaySessionDir(sessionDirPath) {
   if (!fs.existsSync(sessionDirPath)) return null;
 
@@ -289,20 +290,20 @@ function replaySessionDir(sessionDirPath) {
     } catch {}
   }
 
-  return state;
+  return { state, sessionId };
 }
 
-function normalizeReplayed(state, options) {
-  const normalized = normalizeSession(state, options);
+function normalizeReplayed(replayed, options) {
+  const normalized = normalizeSession(replayed.state, options);
   if (!isValidSessionId(normalized.session_id)) {
-    normalized.session_id = state.session_id;
+    normalized.session_id = replayed.sessionId;
   }
   return normalized;
 }
 
 export function readSessionFromDir(sessionDirPath, options = {}) {
-  const state = replaySessionDir(sessionDirPath);
-  return state ? normalizeReplayed(state, options) : null;
+  const replayed = replaySessionDir(sessionDirPath);
+  return replayed ? normalizeReplayed(replayed, options) : null;
 }
 
 // Identity of a session directory's inputs; replay is skipped while it is unchanged.
@@ -358,10 +359,10 @@ export class CopilotAdapter extends BaseAdapter {
           const key = sessionInputsKey(fullPath);
           let cached = this._replayCache.get(fullPath);
           if (!cached || cached.key !== key) {
-            cached = { key, state: replaySessionDir(fullPath) };
+            cached = { key, replayed: replaySessionDir(fullPath) };
             this._replayCache.set(fullPath, cached);
           }
-          const session = cached.state ? normalizeReplayed(cached.state, options) : null;
+          const session = cached.replayed ? normalizeReplayed(cached.replayed, options) : null;
           if (session && !session.terminated) {
             sessions.push(session);
           }
