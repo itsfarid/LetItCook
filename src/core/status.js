@@ -96,7 +96,10 @@ export function normalizeSession(raw, options = {}) {
     }
   }
 
-  if (!terminated && (status === STATUS.COOKING || status === STATUS.YOUR_TURN)) {
+  // Only Cooking goes stale: without new events there is no evidence of work. An
+  // unanswered Your Turn is still the user's turn however long it waits; it ends with a
+  // new event, its process exiting (above) or the session being removed.
+  if (!terminated && status === STATUS.COOKING) {
     if (now - updatedAt > staleMs) {
       stale = true;
       status = STATUS.UNKNOWN;

@@ -422,7 +422,8 @@ class LetItCookButton extends PanelMenu.Button {
                             }
                         }
 
-                        if (status === STATUS.COOKING || status === STATUS.YOUR_TURN) {
+                        // Only Cooking goes stale; an unanswered Your Turn stays Your Turn.
+                        if (status === STATUS.COOKING) {
                             if (now - updatedAt > STALE_TIMEOUT_MS) {
                                 stale = true;
                                 status = STATUS.UNKNOWN;
