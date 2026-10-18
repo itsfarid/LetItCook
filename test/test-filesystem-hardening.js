@@ -248,11 +248,11 @@ function loadReadSessions(target) {
   const meta = {};
   for (const s of Object.values(STATUS)) meta[s] = { priority: 0 };
   const factory = new Function(
-    'Gio', 'GLib', 'STATUS', 'STATUS_META', 'STALE_TIMEOUT_MS', 'console', 'log',
+    'Gio', 'GLib', 'STATUS', 'STATUS_META', 'STALE_TIMEOUT_MS', 'DEAD_SESSION_RETENTION_MS', 'console', 'log',
     `return function _readSessions() {\n${match[1]}\n};`,
   );
   return (Gio, GLib) => ({
-    fn: factory(Gio, GLib, STATUS, meta, 5 * 60 * 1000, fakeConsole, fakeConsole.error),
+    fn: factory(Gio, GLib, STATUS, meta, 5 * 60 * 1000, 60 * 60 * 1000, fakeConsole, fakeConsole.error),
     logs,
   });
 }
