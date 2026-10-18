@@ -28,10 +28,11 @@ export function toolCallRequestId(input) {
 }
 
 // Settings block shared by agents using the {"hooks": {Event: [{hooks: [...]}]}} format.
-export function commandHooksConfig(events, command, timeouts = {}) {
+// Timeouts are in seconds; the hook itself takes well under one.
+export function commandHooksConfig(events, command, timeoutSec = 10) {
   const hooks = {};
   for (const event of events) {
-    hooks[event] = [{ hooks: [{ type: 'command', command, timeout: timeouts[event] || 10 }] }];
+    hooks[event] = [{ hooks: [{ type: 'command', command, timeout: timeoutSec }] }];
   }
   return { hooks };
 }

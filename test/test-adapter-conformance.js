@@ -11,6 +11,7 @@ import path from 'node:path';
 import { reduceSession } from '../src/core/lifecycle.js';
 import { applySignals, readStateFile, stateFileName } from '../src/hooks/bridge.js';
 import { claudeHooks, ClaudeAdapter } from '../src/adapters/claude/hooks.js';
+import { codexHooks, CodexAdapter } from '../src/adapters/codex/hooks.js';
 
 // Applies a fixture that may be a single event or a sequence of events.
 function sequenced(stepOne) {
@@ -173,7 +174,27 @@ export const claudeSpec = {
   sourceFiles: ['src/adapters/claude/hooks.js', 'src/adapters/hook-adapter.js', 'src/adapters/hook-input.js', 'src/core/lifecycle.js'],
 };
 
-export const SPECS = [openCodeSpec, copilotSpec, claudeSpec];
+// --- Codex CLI: command hooks (src/adapters/codex/hooks.js) ---
+const codexEvent = (event, sid, extra = {}) => ({
+  session_id: sid, turn_id: 'turn', transcript_path: null, cwd: '/work', model: 'm', permission_mode: 'default',
+  hook_event_name: event, ...extra,
+});
+export const codexSpec = {
+  id: 'codex',
+  step: hookStep(codexHooks),
+  replayThroughFiles: hookReplayThroughFiles(codexHooks),
+  fixtures: {
+    promptSubmit: sid => codexEvent('UserPromptSubmit', sid, { prompt: SECRET }),
+    toolStart: (sid, n) => codexEvent('PreToolUse', sid, { tool_name: 'exec_command', tool_use_id: `call_${n}`, tool_input: { cmd: `${SECRET} ${n}` } }),
+    toolEnd: (sid, n) => codexEvent('PostToolUse', sid, { tool_name: 'exec_command', tool_use_id: `call_${n}`, tool_input: { cmd: `${SECRET} ${n}` }, tool_response: SECRET }),
+  },
+  malformed: [{ hook_event_name: 'PreToolUse' }, { hook_event_name: 'Stop', session_id: '../x' }, { hook_event_name: { a: 1 }, session_id: 's1' }],
+  createAdapter: () => new CodexAdapter(),
+  binEnv: ['CODEX_BIN'],
+  sourceFiles: ['src/adapters/codex/hooks.js', 'src/adapters/hook-adapter.js', 'src/adapters/hook-input.js', 'src/core/lifecycle.js'],
+};
+
+export const SPECS = [openCodeSpec, copilotSpec, claudeSpec, codexSpec];
 
 function run() {
   for (const spec of SPECS) {
