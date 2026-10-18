@@ -1,0 +1,56 @@
+# Automated checks for LetItCook. These run the Node test suite (which exercises the
+# extension code against fakes), syntax checks and packaging of both GNOME extension
+# variants. They do not run GNOME Shell: real desktop behaviour still needs manual testing.
+name: test
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node: ['20.x', '22.x', '24.x']
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+      - name: Syntax check
+        run: git ls-files '*.js' '*.mjs' | xargs -n1 node --check
+      - name: Whitespace check (pull requests)
+        if: github.event_name == 'pull_request'
+        run: git diff --check "origin/${{ github.base_ref }}...HEAD"
+      - name: Test suite
+        run: npm test
+
+  package:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install gnome-extensions
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends gnome-shell
+      - name: Validate metadata
+        run: |
+          for dir in extension extension-legacy; do
+            python3 -c "import json,sys; d=json.load(open('$dir/metadata.json')); assert d['uuid']=='letitcook@letitcook.local', d; print('$dir', d['shell-version'])"
+          done
+      - name: Pack both variants
+        run: |
+          mkdir -p dist/modern dist/legacy
+          gnome-extensions pack --force --out-dir=dist/modern extension
+          gnome-extensions pack --force --out-dir=dist/legacy extension-legacy
+          for zip in dist/*/*.zip; do
+            echo "$zip"; unzip -Z1 "$zip"
+            test "$(unzip -Z1 "$zip" | sort | tr '\n' ' ')" = "extension.js metadata.json stylesheet.css "
+          done
