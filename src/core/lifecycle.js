@@ -152,10 +152,6 @@ export function reduceSession(prev, signal, context = {}) {
   const agent = context.agent || (prev && prev.agent) || 'unknown';
   const now = Number.isFinite(context.now) ? context.now : Date.now();
 
-  if (s.type === SIGNAL.SESSION_END) {
-    return s.subagent ? null : { session_id: s.sessionId, agent, deleted: true, updated_at: now };
-  }
-
   if (s.type === SIGNAL.METADATA && !prev) return null;
   const capabilities = s.capabilities || (prev && Array.isArray(prev.capabilities) ? prev.capabilities : undefined);
   const needed = !s.subagent && REQUIRED_CAPABILITY[s.type];
@@ -183,11 +179,18 @@ export function reduceSession(prev, signal, context = {}) {
   // - a turn start or end older than the last applied one is late;
   // - a request or activity from before the current turn ended is late: the ended turn
   //   is not waiting for that request or working any more (a turn that ended without
-  //   outcome or was cancelled stays Your Turn).
+  //   outcome or was cancelled stays Your Turn);
+  // - a session end from before the latest turn start or end is late (below).
   if (s.eventId && seen.includes(s.eventId)) return null;
   if (s.turnId && turn && s.turnId !== turn && (TURN_ENDING.includes(type) || type === SIGNAL.REQUEST_OPEN)) return null;
   if (turnLevel && s.at && turnAt && s.at < turnAt) return null;
   if ((type === SIGNAL.REQUEST_OPEN || type === SIGNAL.ACTIVITY) && s.at && endedAt && s.at < endedAt) return null;
+  // A session end sent before the latest turn start or end is from an earlier run of the
+  // session (a producer that resumed it) and must not remove the resumed session.
+  if (type === SIGNAL.SESSION_END) {
+    if (s.subagent || (s.at && turnAt && s.at < turnAt)) return null;
+    return { session_id: s.sessionId, agent, deleted: true, updated_at: now };
+  }
   if (turnLevel) {
     if (type === SIGNAL.TURN_START) {
       turn = s.turnId;
