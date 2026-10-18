@@ -122,9 +122,22 @@ function closedWith(closed, id) {
   return [...closed.filter(x => x !== id), id].slice(-MAX_CLOSED);
 }
 
+// Waiting requests are kept in a dictionary without a prototype, and looked up only as own
+// properties: request ids come from producers, and names like `__proto__`, `constructor`
+// or `toString` must be ordinary keys, never inherited members.
+function requestMap(source) {
+  const map = Object.create(null);
+  if (source && typeof source === 'object') {
+    for (const key of Object.keys(source)) {
+      if (typeof source[key] === 'string') map[key] = source[key];
+    }
+  }
+  return map;
+}
+
 function withoutRequest(pending, id) {
-  if (!id) return {};
-  const next = { ...pending };
+  if (!id) return requestMap();
+  const next = requestMap(pending);
   delete next[id];
   return next;
 }
@@ -149,7 +162,7 @@ export function reduceSession(prev, signal, context = {}) {
   if (needed && capabilities && !capabilities.includes(needed)) return null;
 
   const lifecycle = (prev && prev.lifecycle) || {};
-  let pending = { ...(lifecycle.pending || {}) };
+  let pending = requestMap(lifecycle.pending);
   let closed = Array.isArray(lifecycle.closed) ? lifecycle.closed.slice(-MAX_CLOSED) : [];
   const seen = Array.isArray(lifecycle.seen) ? lifecycle.seen.slice(-MAX_SEEN) : [];
   let turn = typeof lifecycle.turn === 'string' ? lifecycle.turn : undefined;
@@ -176,7 +189,7 @@ export function reduceSession(prev, signal, context = {}) {
 
   switch (type) {
     case SIGNAL.TURN_START:
-      pending = {};
+      pending = requestMap();
       status = STATUS.COOKING;
       reason = s.reason || 'prompt submitted';
       break;
@@ -190,7 +203,7 @@ export function reduceSession(prev, signal, context = {}) {
     case SIGNAL.REQUEST_OPEN: {
       const id = s.requestId || 'request';
       if (closed.includes(id)) return null;
-      if (!(id in pending) && Object.keys(pending).length >= MAX_PENDING) return null;
+      if (!Object.hasOwn(pending, id) && Object.keys(pending).length >= MAX_PENDING) return null;
       pending[id] = s.reason || 'waiting for you';
       status = STATUS.YOUR_TURN;
       reason = pending[id];
@@ -200,7 +213,7 @@ export function reduceSession(prev, signal, context = {}) {
       if (settled) return null;
       if (s.remember) closed = closedWith(closed, s.requestId);
       // Resolving a request that is not waiting (unknown, or a duplicate) changes no status.
-      if (s.requestId && !(s.requestId in pending)) {
+      if (s.requestId && !Object.hasOwn(pending, s.requestId)) {
         if (!prev) return null;
         break;
       }
@@ -216,22 +229,22 @@ export function reduceSession(prev, signal, context = {}) {
       break;
     }
     case SIGNAL.TURN_COMPLETE:
-      pending = {};
+      pending = requestMap();
       status = STATUS.DONE;
       reason = s.reason || 'turn completed';
       break;
     case SIGNAL.TURN_END:
-      pending = {};
+      pending = requestMap();
       status = STATUS.YOUR_TURN;
       reason = s.reason || 'turn ended';
       break;
     case SIGNAL.FAILURE:
-      pending = {};
+      pending = requestMap();
       status = STATUS.BURN;
       reason = s.reason || 'failed';
       break;
     case SIGNAL.CANCEL:
-      pending = {};
+      pending = requestMap();
       status = STATUS.YOUR_TURN;
       reason = s.reason || 'cancelled';
       break;
@@ -252,7 +265,8 @@ export function reduceSession(prev, signal, context = {}) {
     created_at: prev && Number.isFinite(prev.created_at) ? prev.created_at : now,
     updated_at: now,
     confidence: 'high',
-    lifecycle: { pending, closed },
+    // fromEntries defines every key as an own property (`__proto__` included).
+    lifecycle: { pending: Object.fromEntries(Object.entries(pending)), closed },
   };
   if (s.eventId) record.lifecycle.seen = [...seen, s.eventId].slice(-MAX_SEEN);
   else if (seen.length) record.lifecycle.seen = seen;

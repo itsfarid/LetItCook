@@ -233,6 +233,26 @@ function testCapabilities() {
   }
 }
 
+// Request ids are producer data: inherited object member names must be ordinary keys
+// (Devin review on PR #7).
+function testPrototypeSensitiveRequestIds() {
+  for (const id of ['__proto__', 'constructor', 'toString', 'hasOwnProperty', 'valueOf']) {
+    const waiting = run([{ type: SIGNAL.TURN_START }, { type: SIGNAL.REQUEST_OPEN, requestId: id, reason: 'permission:x' }, { type: SIGNAL.ACTIVITY }]).state;
+    assert.strictEqual(waiting.status, STATUS.YOUR_TURN, `${id}: still waiting after activity`);
+    assert.deepStrictEqual(Object.keys(waiting.lifecycle.pending), [id], `${id}: recorded as an own entry`);
+    // It survives the state file (JSON) and is resolved by its own id only.
+    const reloaded = JSON.parse(JSON.stringify(waiting));
+    assert.strictEqual(run([{ type: SIGNAL.ACTIVITY }], reloaded).state.status, STATUS.YOUR_TURN, `${id}: still waiting after a reload`);
+    assert.strictEqual(run([{ type: SIGNAL.REQUEST_CLOSE, requestId: id }], reloaded).state.status, STATUS.COOKING, `${id}: resolved by its id`);
+    // Resolving an inherited name that is not waiting changes nothing.
+    const cancelled = run([{ type: SIGNAL.TURN_START }, { type: SIGNAL.CANCEL }, { type: SIGNAL.REQUEST_CLOSE, requestId: id }]).state;
+    assert.strictEqual(cancelled.status, STATUS.YOUR_TURN, `${id}: an unknown resolution is not taken for a waiting one`);
+  }
+  // A crafted state file cannot inject non-string entries.
+  const crafted = { session_id: SID, agent: 'test', status: STATUS.YOUR_TURN, lifecycle: { pending: { a: 'permission:x', b: { evil: 1 } }, closed: [] } };
+  assert.deepStrictEqual(Object.keys(run([{ type: SIGNAL.ACTIVITY }], crafted).state.lifecycle.pending), ['a']);
+}
+
 function testSubagentsNeverSettleTheParent() {
   for (const type of [SIGNAL.TURN_COMPLETE, SIGNAL.TURN_END, SIGNAL.FAILURE, SIGNAL.CANCEL, SIGNAL.SESSION_END]) {
     const { state } = run([{ type: SIGNAL.TURN_START }, { type, subagent: true }]);
@@ -281,6 +301,7 @@ function run_() {
   testDuplicateAndReorderedRequests();
   testEventOrderingMetadata();
   testCapabilities();
+  testPrototypeSensitiveRequestIds();
   testSubagentsNeverSettleTheParent();
   testSessionEndNeverCompletes();
   testSessionsAreIsolated();
