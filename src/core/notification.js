@@ -115,21 +115,90 @@ export function sanitizeText(str, maxLen = 120) {
 
 // Notification text is built from agent-provided reasons (error messages, commands, model
 // output). Keep one short line: no stack traces, control characters or credentials.
+// The GNOME extension evaluates this on the Shell's main thread, so no pattern ever sees
+// more than the bounded first line (NOTIFY_INPUT_MAX characters), and secret redaction
+// works word by word in linear time.
 // The GNOME extension (both variants) carries an identical copy of these helpers.
 const NOTIFY_SUBJECT_MAX = 80;
 const NOTIFY_REASON_MAX = 80;
-const SECRET_WORD = '(?:api[_-]?key|token|secret|password|passwd|credential|authorization|cookie)';
-const SECRET_ASSIGNMENT_RE = new RegExp(`([\\w-]*${SECRET_WORD}[\\w-]*)\\s*[:=]\\s*("[^"]*"|'[^']*'|[^\\s,;]+)`, 'gi');
-const SECRET_FLAG_RE = new RegExp(`(--?[\\w-]*${SECRET_WORD}[\\w-]*)\\s+("[^"]*"|'[^']*'|[^\\s,;]+)`, 'gi');
+const NOTIFY_INPUT_MAX = 512;
+const SECRET_KEY_RE = /api[_-]?key|token|secret|password|passwd|credential|authorization|cookie/i;
+
+// First line of untrusted text, at most NOTIFY_INPUT_MAX + 1 characters.
+function notificationFirstLine(value) {
+  const head = value.slice(0, NOTIFY_INPUT_MAX + 1);
+  const end = head.search(/[\r\n]/);
+  return end === -1 ? head : head.slice(0, end);
+}
+
+// A line over NOTIFY_INPUT_MAX is cut at the last whitespace before the limit, so a
+// partly cut word (possibly part of a secret) is dropped entirely, and the cut is marked.
+function boundNotificationText(text) {
+  if (text.length <= NOTIFY_INPUT_MAX) return text;
+  let cut = NOTIFY_INPUT_MAX - 2;
+  while (cut > 0 && !/\s/.test(text[cut])) cut--;
+  return `${text.slice(0, cut).trimEnd()} …`.trimStart();
+}
+
+function openQuote(value) {
+  const quote = value[0];
+  return (quote === '"' || quote === "'") && value.indexOf(quote, 1) === -1 ? quote : '';
+}
+
+// Redact the value after a sensitive key: `key=value`, `prefix:key=value`, `key: value`,
+// `key = value`, `--key value`, and after `Bearer`. Each word is scanned once.
+function redactNotificationSecrets(text) {
+  const words = text.split(/(\s+)/); // words at even indexes, whitespace in between
+  let redactNext = false;
+  let quote = '';
+  for (let i = 0; i < words.length; i += 2) {
+    const word = words[i];
+    if (!word) continue;
+    if (word === '…') { // truncation marker, never a value
+      redactNext = false;
+      continue;
+    }
+    if (quote) { // rest of a quoted secret value
+      words[i] = '';
+      if (word.includes(quote)) quote = '';
+      continue;
+    }
+    if (redactNext) {
+      if (word === '=' || word === ':') continue;
+      words[i] = '[redacted]';
+      redactNext = /^bearer$/i.test(word);
+      quote = openQuote(word);
+      continue;
+    }
+    let start = 0;
+    let separator = -1;
+    for (let j = 0; j < word.length && separator === -1; j++) {
+      if (word[j] !== ':' && word[j] !== '=') continue;
+      if (SECRET_KEY_RE.test(word.slice(start, j))) separator = j;
+      start = j + 1;
+    }
+    if (separator !== -1) {
+      const value = word.slice(separator + 1);
+      if (value) {
+        words[i] = `${word.slice(0, separator + 1)}[redacted]`;
+        quote = openQuote(value);
+      } else {
+        redactNext = true;
+      }
+    } else if (/^bearer$/i.test(word) ||
+               (SECRET_KEY_RE.test(word) && (word[0] === '-' || words[i + 2] === '=' || words[i + 2] === ':'))) {
+      redactNext = true;
+    }
+  }
+  return words.join('');
+}
 
 export function cleanNotificationText(value, maxLen) {
   if (typeof value !== 'string') return '';
-  let text = value.replace(/\u001b\[[0-9;?]*[ -\/]*[@-~]/g, ''); // ANSI escape sequences
-  text = text.split(/[\r\n]/)[0]; // first line only: drops stack traces and output dumps
+  let text = boundNotificationText(notificationFirstLine(value)); // drops stack traces and dumps
+  text = text.replace(/\u001b\[[0-9;?]*[ -\/]*[@-~]/g, ''); // ANSI escape sequences
   text = text.replace(/[\u0000-\u001f\u007f-\u009f]/g, ' ');
-  text = text.replace(/\bbearer\s+[^\s,;]+/gi, 'Bearer [redacted]');
-  text = text.replace(SECRET_FLAG_RE, '$1 [redacted]');
-  text = text.replace(SECRET_ASSIGNMENT_RE, '$1=[redacted]');
+  text = redactNotificationSecrets(text);
   text = text.replace(/[A-Za-z0-9+/_=-]{32,}/g, '[redacted]'); // long tokens and keys
   text = text.replace(/\s+/g, ' ').trim();
   return text.length > maxLen ? `${text.slice(0, maxLen - 1)}…` : text;
@@ -141,8 +210,9 @@ export function cleanNotificationText(value, maxLen) {
 // absolute paths to their last component.
 export function notificationReason(status, reason) {
   if (typeof reason !== 'string') return '';
-  let text = reason;
-  if (status === STATUS.YOUR_TURN) text = text.split(/[\r\n]/)[0].split(':').slice(0, 2).join(':');
+  let text = notificationFirstLine(reason);
+  if (status === STATUS.YOUR_TURN) text = text.split(':').slice(0, 2).join(':');
+  text = boundNotificationText(text);
   text = text.replace(/\b([a-z][a-z0-9+.-]*):\/\/(?:[^\s/@]*@)?([^\s/?#'"]+)[^\s'"]*/gi, '$1://$2');
   text = text.replace(/(?:~|\.{1,2})?\/(?:[^\s/'"`,;:()]+\/)+([^\s/'"`,;:()]*)/g, '…/$1');
   return cleanNotificationText(text, NOTIFY_REASON_MAX);
