@@ -103,7 +103,7 @@ With the extension enabled and the plugin configured, run the end-to-end self-te
 npm run selftest -- --model deepseek/deepseek-v4-pro
 ```
 
-It starts a private, password-protected OpenCode server on `127.0.0.1` in a temporary project. Then it sends one prompt and checks each step: Cooking, then a real permission request (Your Turn), then the GNOME notification, then Cooking again after approval, then Done. It asks whether you saw the popups. It only ever approves the exact command `echo letitcook-selftest`, and it removes the session, server, and temporary project afterwards. Each run makes one short model call. Without `--model`, it uses your most recent OpenCode model. The Done notification step is skipped unless "Notify on Done" is on.
+It starts a private, password-protected OpenCode server on `127.0.0.1` in a temporary project. Then it sends one prompt and checks each step: Cooking, then a real permission request (Your Turn), then the GNOME notification, then Cooking again after approval, then Done. It asks whether you saw the popups. It only ever approves the exact command `echo letitcook-selftest`, and it removes the session, server, and temporary project afterwards. Each run makes one short model call. Pressing Ctrl+C (or sending SIGTERM) stops it cleanly: it rejects the pending request, deletes the test session, stops its server, and exits with code 130 (or 143). Without `--model`, it uses your most recent OpenCode model. The Done notification step is skipped unless "Notify on Done" is on.
 
 ### Uninstall
 
