@@ -277,6 +277,25 @@ function testLateActivityAfterTheTurnEnded() {
   assert.strictEqual(run([{ type: SIGNAL.TURN_START }, { type: SIGNAL.TURN_END }, { type: SIGNAL.ACTIVITY }]).state.status, STATUS.COOKING);
 }
 
+// A session end from an earlier run of the session, delivered after the producer resumed
+// it, must not remove the resumed session (Devin review on PR #7).
+function testLateSessionEndAfterResume() {
+  const resumed = run([
+    { type: SIGNAL.TURN_START, turnId: 't1', at: 100, eventId: 'a1' },
+    { type: SIGNAL.TURN_COMPLETE, turnId: 't1', at: 150, eventId: 'a2' },
+    { type: SIGNAL.TURN_START, turnId: 't2', at: 300, eventId: 'b1' },
+  ]).state;
+  const lateEnd = reduceSession(resumed, { type: SIGNAL.SESSION_END, sessionId: SID, at: 200, eventId: 'a3' }, ctx());
+  assert.strictEqual(lateEnd, null, 'an end older than the resumed turn is ignored');
+  const duplicate = reduceSession(resumed, { type: SIGNAL.SESSION_END, sessionId: SID, at: 400, eventId: 'b1' }, ctx());
+  assert.strictEqual(duplicate, null, 'a duplicate event id is ignored for session ends too');
+  assert.ok(reduceSession(resumed, { type: SIGNAL.SESSION_END, sessionId: SID, at: 400, eventId: 'b2' }, ctx()).deleted, 'a newer end removes it');
+  assert.ok(reduceSession(resumed, { type: SIGNAL.SESSION_END, sessionId: SID }, ctx()).deleted, 'an end without producer time (native) removes it');
+  assert.ok(reduceSession(null, { type: SIGNAL.SESSION_END, sessionId: SID, at: 50 }, ctx()).deleted, 'an end without a preceding turn is still accepted');
+  // An end with the same time as the turn event is not older.
+  assert.ok(reduceSession(resumed, { type: SIGNAL.SESSION_END, sessionId: SID, at: 300 }, ctx()).deleted);
+}
+
 // Request ids are producer data: inherited object member names must be ordinary keys
 // (Devin review on PR #7).
 function testPrototypeSensitiveRequestIds() {
@@ -348,6 +367,7 @@ function run_() {
   testPrototypeSensitiveRequestIds();
   testLateRequestsAfterTheTurnEnded();
   testLateActivityAfterTheTurnEnded();
+  testLateSessionEndAfterResume();
   testSubagentsNeverSettleTheParent();
   testSessionEndNeverCompletes();
   testSessionsAreIsolated();

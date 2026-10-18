@@ -71,6 +71,20 @@ function testCommandTransport() {
   });
 }
 
+// A producer that resumes a session after a restart: the earlier run's session.ended,
+// delivered late, does not remove the resumed session (Devin review on PR #7).
+function testLateSessionEndDoesNotRemoveAResumedSession() {
+  withHome((home, dir) => {
+    const t = Date.now();
+    emit(home, event('turn.started', { turn_id: 'old', time: t - 3000 }));
+    emit(home, event('turn.started', { turn_id: 'new', time: t - 1000 }));
+    emit(home, event('session.ended', { time: t - 2000 }));
+    assert.strictEqual(read(dir, '@mycli.s1.json').status, STATUS.COOKING, 'the resumed session stays');
+    emit(home, event('session.ended', { time: t }));
+    assert.ok(!fs.existsSync(path.join(dir, '@mycli.s1.json')), 'a current end removes it');
+  });
+}
+
 function testRejectedEventsWriteNothing() {
   withHome((home, dir) => {
     const rejected = [
@@ -167,6 +181,7 @@ function testRegistryAdapter() {
 
 async function run() {
   testCommandTransport();
+  testLateSessionEndDoesNotRemoveAResumedSession();
   testRejectedEventsWriteNothing();
   testNativeSessionsCannotBeTouched();
   testSymlinkedSessionFileIsReplacedNotFollowed();
