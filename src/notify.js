@@ -24,7 +24,7 @@ export function sendDesktopNotification(title, body, urgency = 'normal') {
   }
 }
 
-function getCachePath() {
+export function getCachePath() {
   const xdgState = process.env.XDG_STATE_HOME;
   const base = xdgState && path.isAbsolute(xdgState) ? xdgState : path.join(os.homedir(), '.local', 'state');
   return path.join(base, 'letitcook', 'notify_cache.json');
