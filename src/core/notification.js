@@ -113,6 +113,41 @@ export function sanitizeText(str, maxLen = 120) {
   return cleaned.slice(0, maxLen - 1) + '…';
 }
 
+// Notification text is built from agent-provided reasons (error messages, commands, model
+// output). Keep one short line: no stack traces, control characters or credentials.
+// The GNOME extension (both variants) carries an identical copy of these helpers.
+const NOTIFY_SUBJECT_MAX = 80;
+const NOTIFY_REASON_MAX = 80;
+const SECRET_WORD = '(?:api[_-]?key|token|secret|password|passwd|credential|authorization|cookie)';
+const SECRET_ASSIGNMENT_RE = new RegExp(`([\\w-]*${SECRET_WORD}[\\w-]*)\\s*[:=]\\s*("[^"]*"|'[^']*'|[^\\s,;]+)`, 'gi');
+const SECRET_FLAG_RE = new RegExp(`(--?[\\w-]*${SECRET_WORD}[\\w-]*)\\s+("[^"]*"|'[^']*'|[^\\s,;]+)`, 'gi');
+
+export function cleanNotificationText(value, maxLen) {
+  if (typeof value !== 'string') return '';
+  let text = value.replace(/\u001b\[[0-9;?]*[ -\/]*[@-~]/g, ''); // ANSI escape sequences
+  text = text.split(/[\r\n]/)[0]; // first line only: drops stack traces and output dumps
+  text = text.replace(/[\u0000-\u001f\u007f-\u009f]/g, ' ');
+  text = text.replace(/\bbearer\s+[^\s,;]+/gi, 'Bearer [redacted]');
+  text = text.replace(SECRET_FLAG_RE, '$1 [redacted]');
+  text = text.replace(SECRET_ASSIGNMENT_RE, '$1=[redacted]');
+  text = text.replace(/[A-Za-z0-9+/_=-]{32,}/g, '[redacted]'); // long tokens and keys
+  text = text.replace(/\s+/g, ' ').trim();
+  return text.length > maxLen ? `${text.slice(0, maxLen - 1)}…` : text;
+}
+
+// Your Turn shows only what kind of input is needed: the first two `category:detail`
+// fields of the reason (e.g. `permission.asked:bash`), never the payload such as command
+// arguments. Other reasons keep their message, with URLs reduced to their host and
+// absolute paths to their last component.
+export function notificationReason(status, reason) {
+  if (typeof reason !== 'string') return '';
+  let text = reason;
+  if (status === STATUS.YOUR_TURN) text = text.split(/[\r\n]/)[0].split(':').slice(0, 2).join(':');
+  text = text.replace(/\b([a-z][a-z0-9+.-]*):\/\/(?:[^\s/@]*@)?([^\s/?#'"]+)[^\s'"]*/gi, '$1://$2');
+  text = text.replace(/(?:~|\.{1,2})?\/(?:[^\s/'"`,;:()]+\/)+([^\s/'"`,;:()]*)/g, '…/$1');
+  return cleanNotificationText(text, NOTIFY_REASON_MAX);
+}
+
 export function shouldNotify(prevStatus, session, options = {}) {
   if (!session || typeof session !== 'object') {
     return { notify: false, reason: 'invalid_session' };
@@ -158,11 +193,11 @@ export function shouldNotify(prevStatus, session, options = {}) {
 }
 
 export function formatNotification(session) {
-  const agent = sanitizeText(session?.agent || 'Agent', 32);
+  const agent = cleanNotificationText(session?.agent || 'Agent', 32) || 'Agent';
   const title = `LetItCook: ${agent}`;
   const status = session?.status;
-  const reason = sanitizeText(session?.reason, 80);
-  const subject = sanitizeText(session?.title || shortCwd(session?.cwd), 80);
+  const reason = notificationReason(status, session?.reason);
+  const subject = cleanNotificationText(session?.title || shortCwd(session?.cwd), NOTIFY_SUBJECT_MAX);
 
   let body = '';
   if (status === STATUS.YOUR_TURN) {
