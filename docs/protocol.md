@@ -2,7 +2,7 @@
 
 A small, versioned protocol that lets any coding CLI, plugin or wrapper report its sessions to LetItCook. It needs no change to LetItCook's core, its lifecycle rules or the GNOME extension.
 
-> **Status:** design draft, being implemented on this branch. No third-party CLI has been verified with it.
+> **Status:** the protocol is implemented. It has been tested with synthetic events and with the bundled reference producer, which drives the real `hook.js event` command. Both GNOME extension variants have read its sessions under GJS. No third-party CLI has been verified with it, and the panel has not been checked by hand.
 
 ## When to use it
 
@@ -127,6 +127,17 @@ A producer declares which outcomes it can report in `capabilities` on `session.s
 
 `turn.started`, `activity`, `turn.ended`, `session.*` and `subagent.*` are always allowed. A producer that cannot tell success from failure and cancellation declares none of `complete`, `fail` and `cancel`, and sends `turn.ended`. It then honestly shows Your Turn at the end of each turn instead of claiming Done. A producer that declares nothing is not restricted, but `validate.js` reports which states it actually produced.
 
+## Limits
+
+| Limit | Value |
+|---|---|
+| Event size | 16 KiB |
+| Event time | At most 24 hours before or 5 minutes after the receiving machine's clock |
+| Remembered event ids per session | 64 |
+| Waiting requests per session | 32 |
+| Remembered resolved requests per session | 32 |
+| Validator input | 4 MiB |
+
 ## Trust model
 
 - **What is protected:**
@@ -135,6 +146,7 @@ A producer declares which outcomes it can report in `capabilities` on `session.s
   - **Paths.** Path traversal is impossible: identifiers are validated and file names are derived from them.
   - **Native sessions.** A producer cannot write a native adapter's session files: the agent ids are reserved and protocol files use the `@` prefix.
   - **Content.** Nothing is executed, and only identifiers and `cwd` are stored.
+- **`pid` is not verified.** It only tells the panel which process to watch. A wrong `pid` can make a session look gone (Unknown) or keep it shown longer; it cannot produce Done or Burn.
 - **What is not protected:** processes running as the same user. They can run the event command with any `agent` and `session_id`, or write the state directory directly, just as they can edit any of the user's files. LetItCook cannot tell same-user producers apart and does not try. Do not run untrusted code as your user.
 
 ## Onboarding a CLI
