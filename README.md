@@ -131,6 +131,8 @@ For persistent operation, run it as a systemd user service or Cron job.
 | `~/.local/state/letitcook/notify_cache.json` | Notification state (deduplication, notify-on-Done toggle) | Generated on first start | Deleting it resets notification state (opt-out) |
 | `~/.copilot/` | Copilot CLI state | Copilot-generated | Do not delete Copilot state unless you want to restart Copilot completely |
 
+The state directories must be owned by you. If `~/.local/state/letitcook` (or its `sessions` directory) is a symlink, it must be your own link to a directory you own that other users cannot access (`chmod 700` it); otherwise LetItCook refuses to use it rather than changing permissions through the link.
+
 **Default paths can be overridden via environment variables:**
 
 - `XDG_STATE_HOME`: Base state directory used by the extension, plugin, sync bridge, and notification tool alike (default: `~/.local/state`)
