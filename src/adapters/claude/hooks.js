@@ -22,6 +22,8 @@ export const claudeHooks = {
   name: 'Claude Code',
   bins: ['claude'],
   binEnv: 'CLAUDE_BIN',
+  // Outcomes it can report (src/core/lifecycle.js CAPABILITY): all of them.
+  capabilities: ['cancel', 'complete', 'fail', 'requests'],
   // Hook events LetItCook registers for.
   events: [
     'UserPromptSubmit', 'PreToolUse', 'PostToolUse', 'PostToolUseFailure',
@@ -50,7 +52,8 @@ export const claudeHooks = {
 
     switch (event) {
       case 'UserPromptSubmit':
-        return [{ ...base, type: SIGNAL.TURN_START, title: str(input.session_title) }];
+        // session_title is generated from the prompt, so it is not stored either.
+        return [{ ...base, type: SIGNAL.TURN_START }];
       case 'PreToolUse': {
         // The main agent starting a tool is new work even after Stop: Claude Code continues
         // a turn when another Stop hook blocks it, without a new prompt.

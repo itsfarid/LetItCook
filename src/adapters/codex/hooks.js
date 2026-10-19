@@ -15,6 +15,8 @@ export const codexHooks = {
   name: 'Codex CLI',
   bins: ['codex'],
   binEnv: 'CODEX_BIN',
+  // Outcomes it can report: no failure (an errored turn has no hook).
+  capabilities: ['cancel', 'complete', 'requests'],
   // Hook events LetItCook registers for.
   events: [
     'UserPromptSubmit', 'PreToolUse', 'PostToolUse', 'PermissionRequest',

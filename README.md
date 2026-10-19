@@ -37,6 +37,7 @@ When a supported agent requires user interaction, LetItCook can display a GNOME 
 | Claude Code | 🧪 New, fixture-tested only | Official command hooks (`UserPromptSubmit`, tool, permission, `Stop`/`StopFailure`, subagent and session events) |
 | Codex CLI | 🧪 New, fixture-tested only | Official command hooks (`UserPromptSubmit`, tool, `PermissionRequest`, `Stop`, `Interrupt`, subagent and session events); never `Burn` |
 | Gemini CLI | 🧪 New, fixture-tested only, partial | Official command hooks; every finished turn is `Your Turn` (never `Done` or `Burn`) |
+| Other CLIs | 🧪 Event protocol, reference producer only | Any plugin, wrapper or CLI can report sessions through the [LetItCook event protocol](docs/protocol.md) with no LetItCook change; no third-party CLI verified yet |
 | Goose | ⏸️ Deferred | No hook fires for approval requests; see [docs/adapters.md](docs/adapters.md#goose-deferred) |
 
 See [docs/adapters.md](docs/adapters.md) for how each agent's events map to the states, what each one cannot report, and how adapters are tested. [AGENTS.md §28](AGENTS.md#28-agent-adapter-status) has the per-state reliability notes.
@@ -148,6 +149,16 @@ node src/hooks/hook.js --print-config gemini
 
 Review it and merge its `hooks` entries into `~/.gemini/settings.json`, then restart Gemini CLI. The hooks are named `letitcook-<event>`, so you can disable them with `/hooks disable`, list them under `hooksConfig.disabled`, or remove them.
 
+### Other CLIs: the event protocol
+
+A CLI without a native adapter can report its sessions through the [LetItCook event protocol](docs/protocol.md). Its plugin, wrapper or the CLI itself runs `node src/hooks/hook.js event` with one JSON event on stdin, or uses `src/protocol/sdk.js` from Node.js. To see what it looks like without any model or API key, run the reference producer and watch the panel:
+
+```bash
+node examples/protocol-producer.mjs --scenario permission --keep
+```
+
+Record a producer's events and check them with `node src/protocol/validate.js events.jsonl`. To remove an integration, stop it from sending events; its sessions disappear when it ends them, when its process exits, or an hour after their last event.
+
 ### Copilot CLI setup (if using GitHub Copilot CLI)
 
 Copilot sessions appear in the panel only when `node src/sync.js --watch` (or a systemd timer) runs. Start it once:
@@ -162,7 +173,7 @@ For persistent operation, run it as a systemd user service or Cron job.
 
 | Path | Data | Generated / User-editable | Safe to delete |
 |---|---|---|---|
-| `~/.local/state/letitcook/sessions/` | Session state files (`{session_id}.json`, `copilot_{session_id}.json`, `claude_{session_id}.json`, `codex_{session_id}.json`, `gemini_{session_id}.json`) | Generated on first start | Sessions are recreated from adapter sources |
+| `~/.local/state/letitcook/sessions/` | Session state files (`{session_id}.json`, `copilot_{session_id}.json`, `claude_{session_id}.json`, `codex_{session_id}.json`, `gemini_{session_id}.json`, `@{agent}.{session_id}.json` for the event protocol) | Generated on first start | Sessions are recreated from adapter sources |
 | `~/.local/state/letitcook/notify_cache.json` | Notification state (deduplication, notify-on-Done toggle) | Generated on first start | Deleting it resets notification state (opt-out) |
 | `~/.copilot/` | Copilot CLI state | Copilot-generated | Do not delete Copilot state unless you want to restart Copilot completely |
 
@@ -191,7 +202,7 @@ The indicator shows which agent most needs your attention:
 - `Unknown` is **not automatically** treated as `Done`. If we cannot reliably determine the state, we postpone the decision.
 - `Done` requires explicit session/task-complete events. Idle sessions without prior completion candidates are reported as `Unknown`.
 - Any agent disappearance (dead PID, missing state) reveals `Unknown`, never an assumed `Done`. A session whose process has exited is shown as `Unknown` for up to one hour after its last update, then removed from the panel. A session that reached `Done` or `Burn` is removed as soon as its process exits.
-- A `Cooking` session with no new state for 5 minutes is shown as `Unknown` (stale). A `Your Turn` session does not time out: a permission prompt or question stays `Your Turn` until it is answered, the session ends, or its process exits (then `Unknown`).
+- A `Cooking` session with no new state for 5 minutes is shown as `Unknown` (stale). A `Your Turn` session does not time out: a permission prompt or question stays `Your Turn` until it is answered, the session ends, or its process exits (then `Unknown`). A session with no process to watch (Copilot, or a hook that could not determine its agent's process) is removed one hour after its last update, whatever its state.
 - Multiple simultaneous sessions: the most urgent/active session determines the panel indicator.
 
 ### Known limitations

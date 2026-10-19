@@ -214,6 +214,10 @@ function testPendingRequestsSurviveParallelActivity() {
     const next = replay([...base, end, ev('assistant.turn_start')]);
     assert.strictEqual(next.status, STATUS.COOKING, `${end.type} clears waiting requests`);
   }
+  for (const start of [ev('session.resume'), ev('session.start'), ev('assistant.turn_start')]) {
+    const resumed = replay([ev('assistant.turn_start'), ev('permission.requested', { requestId: 'old', permissionRequest: { kind: 'shell' } }), start]);
+    assert.strictEqual(resumed.status, STATUS.COOKING, `${start.type} after an unresolved request is Cooking, not the old request`);
+  }
   for (const type of [7, {}, ['permission.requested'], null]) {
     assert.strictEqual(mapCopilotEvent({ type, data: { sessionId: 'par', requestId: 'x' } }, waiting), null, `type ${JSON.stringify(type)} is ignored`);
   }

@@ -16,8 +16,11 @@ import { getSessionDir } from '../adapters/opencode/adapter.js';
 
 // Hook payloads can carry whole tool outputs; anything larger is ignored (and drained).
 export const MAX_INPUT_BYTES = 16 * 1024 * 1024;
-const LOCK_TIMEOUT_MS = 1000;
-const LOCK_STALE_MS = 10 * 1000;
+// A holder keeps the lock for a few milliseconds. A lock older than LOCK_STALE_MS was left
+// by a hook that crashed or was killed and is broken; the wait stays well inside the
+// shortest agent hook timeout (3 s for Codex).
+const LOCK_TIMEOUT_MS = 2000;
+const LOCK_STALE_MS = 1000;
 const MAX_STATE_FILE_BYTES = 256 * 1024;
 
 export async function readBoundedStdin(stream = process.stdin, maxBytes = MAX_INPUT_BYTES) {
@@ -86,8 +89,8 @@ function sleepMs(ms) {
 
 // Serializes the read-modify-write of one session file between concurrent hook
 // processes (agents may run hooks for parallel tool calls at the same time). Returns a
-// release function, or null when the lock could not be taken in time: the update then
-// proceeds unlocked rather than blocking the agent.
+// release function, or null when the lock could not be taken in time: the update is then
+// skipped, because writing unlocked could replace another hook's waiting request.
 export function acquireLock(lockPath, { timeoutMs = LOCK_TIMEOUT_MS, staleMs = LOCK_STALE_MS } = {}) {
   const deadline = Date.now() + timeoutMs;
   for (;;) {
@@ -110,14 +113,17 @@ export function acquireLock(lockPath, { timeoutMs = LOCK_TIMEOUT_MS, staleMs = L
   }
 }
 
-// Reads this adapter's previous record without following symlinks. A file that is not a
-// regular file owned by the current user, is oversized or does not parse is ignored.
+// Reads this adapter's previous record without following symlinks. It must be what the
+// bridge writes: a private (0600-style), single-link regular file owned by the current
+// user. Anything else, an oversized file, or one that does not parse is ignored (the next
+// write replaces it with a fresh record).
 export function readStateFile(filePath, expected) {
   let fd;
   try {
     fd = fs.openSync(filePath, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
     const st = fs.fstatSync(fd);
     if (!st.isFile() || st.size > MAX_STATE_FILE_BYTES) return null;
+    if (st.nlink !== 1 || (st.mode & 0o077) !== 0) return null;
     if (typeof process.getuid === 'function' && st.uid !== process.getuid()) return null;
     const value = JSON.parse(fs.readFileSync(fd, 'utf8'));
     if (!value || value.session_id !== expected.sessionId || value.agent !== expected.agent) return null;
@@ -129,10 +135,26 @@ export function readStateFile(filePath, expected) {
   }
 }
 
-function writeStateFile(dir, filePath, record) {
+// Atomic replace. A failed write or rename removes its temporary file, so failures (a full
+// disk) cannot accumulate hidden files; the previous state file stays as it was.
+export function writeStateFile(dir, filePath, record, fsImpl = fs) {
   const tmpPath = path.join(dir, `.${path.basename(filePath)}.${process.pid}.${Date.now()}.tmp`);
-  fs.writeFileSync(tmpPath, JSON.stringify(record, null, 2), { encoding: 'utf8', mode: 0o600, flag: 'wx' });
-  fs.renameSync(tmpPath, filePath);
+  let created = false;
+  try {
+    const fd = fsImpl.openSync(tmpPath, 'wx', 0o600);
+    created = true;
+    try {
+      fsImpl.writeFileSync(fd, JSON.stringify(record, null, 2), 'utf8');
+    } finally {
+      fsImpl.closeSync(fd);
+    }
+    fsImpl.renameSync(tmpPath, filePath);
+  } catch (error) {
+    if (created) {
+      try { fsImpl.unlinkSync(tmpPath); } catch {}
+    }
+    throw error;
+  }
 }
 
 export function stateFileName(agent, sessionId) {
@@ -141,18 +163,34 @@ export function stateFileName(agent, sessionId) {
 
 // Applies an adapter's signals to the state directory. Returns the records written or
 // removed (for tests and diagnostics).
-export function applySignals(agent, signals, { stateDir = getSessionDir(), now = Date.now(), pid = null } = {}) {
+// `fileName(sessionId)` names the session file (default `<agent>_<session>.json`); it must
+// derive the name from validated ids only, never from free input. If `outcomes` is an
+// array, one entry per signal is appended: 'written' (state changed), 'unchanged' (applied,
+// nothing new to write), 'ignored' (rejected by the state rules: invalid, late,
+// duplicate, undeclared capability) or 'busy' (lock not taken; skipped).
+export function applySignals(agent, signals, {
+  stateDir = getSessionDir(), now = Date.now(), pid = null, lockTimeoutMs = LOCK_TIMEOUT_MS,
+  fileName = sessionId => stateFileName(agent, sessionId), outcomes = null,
+} = {}) {
+  const note = outcome => { if (Array.isArray(outcomes)) outcomes.push(outcome); };
   const results = [];
   if (!Array.isArray(signals) || signals.length === 0) return results;
   ensurePrivateDir(stateDir);
   for (const signal of signals) {
-    if (!signal || !isValidSessionId(signal.sessionId)) continue;
-    const filePath = path.join(stateDir, stateFileName(agent, signal.sessionId));
-    const release = acquireLock(path.join(stateDir, `.${stateFileName(agent, signal.sessionId)}.lock`));
+    if (!signal || !isValidSessionId(signal.sessionId)) { note('ignored'); continue; }
+    const name = fileName(signal.sessionId);
+    if (typeof name !== 'string' || !name.endsWith('.json') || name !== path.basename(name) || name.startsWith('.')) {
+      note('ignored');
+      continue;
+    }
+    const filePath = path.join(stateDir, name);
+    const release = acquireLock(path.join(stateDir, `.${name}.lock`), { timeoutMs: lockTimeoutMs });
+    if (!release) { note('busy'); continue; }
     try {
       const prev = readStateFile(filePath, { sessionId: signal.sessionId, agent });
       const next = reduceSession(prev, signal, { agent, now, pid });
-      if (!next || !shouldPersist(prev, next)) continue;
+      if (!next) { note('ignored'); continue; }
+      if (!shouldPersist(prev, next)) { note('unchanged'); continue; }
       if (next.deleted) {
         try {
           if (fs.lstatSync(filePath).isFile()) fs.unlinkSync(filePath);
@@ -160,26 +198,36 @@ export function applySignals(agent, signals, { stateDir = getSessionDir(), now =
       } else {
         writeStateFile(stateDir, filePath, next);
       }
+      note('written');
       results.push(next);
     } finally {
-      if (release) release();
+      release();
     }
   }
   return results;
 }
 
 // Entry point for one hook invocation. Never throws.
+//
+// An adapter may also define `maxInputBytes` (default MAX_INPUT_BYTES) and
+// `target(input, now)`, returning `{ agent, fileName, pid? }` for inputs that name their own
+// producer (the generic event protocol), or null to reject the input.
 export async function runHook(adapter, { stdin = process.stdin, stateDir, now, pid } = {}) {
   try {
-    const input = parseHookInput(await readBoundedStdin(stdin));
+    const input = parseHookInput(await readBoundedStdin(stdin, adapter.maxInputBytes || MAX_INPUT_BYTES));
     if (!input) return [];
-    const signals = adapter.toSignals(input);
+    const at = now || Date.now();
+    const target = typeof adapter.target === 'function' ? adapter.target(input, at) : { agent: adapter.id };
+    if (!target) return [];
+    const signals = adapter.toSignals(input, at);
     if (!Array.isArray(signals) || signals.length === 0) return [];
-    return applySignals(adapter.id, signals, {
+    const options = {
       stateDir: stateDir || getSessionDir(),
-      now: now || Date.now(),
-      pid: pid === undefined ? findAgentPid() : pid,
-    });
+      now: at,
+      pid: Number.isInteger(target.pid) ? target.pid : (pid === undefined ? findAgentPid() : pid),
+    };
+    if (target.fileName) options.fileName = target.fileName;
+    return applySignals(target.agent, signals, options);
   } catch {
     return [];
   }

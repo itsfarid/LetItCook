@@ -12,10 +12,12 @@ import { readStateFile, stateFileName } from '../hooks/bridge.js';
 // installation and reads those files; the event mapping lives in the agent's
 // `hooks.js` (a pure `toSignals(input)`).
 export class HookAdapter extends BaseAdapter {
-  constructor({ id, name, bins = [], binEnv = null }) {
+  constructor({ id, name, bins = [], binEnv = null, capabilities = [] }) {
     super(id, name);
     this.bins = bins;
     this.binEnv = binEnv;
+    // Outcomes the agent's hooks can report (see CAPABILITY in src/core/lifecycle.js).
+    this.capabilities = [...capabilities];
   }
 
   isAvailable() {

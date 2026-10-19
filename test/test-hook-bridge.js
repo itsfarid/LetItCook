@@ -7,7 +7,7 @@ import { spawn } from 'node:child_process';
 import { pathToFileURL } from 'node:url';
 import {
   readBoundedStdin, parseHookInput, findAgentPid, acquireLock, readStateFile,
-  stateFileName, applySignals, runHook,
+  stateFileName, applySignals, runHook, writeStateFile,
 } from '../src/hooks/bridge.js';
 import { SIGNAL } from '../src/core/lifecycle.js';
 import { STATUS } from '../src/core/status.js';
@@ -62,11 +62,49 @@ function testLocking() {
     release();
     assert.ok(!fs.existsSync(lock), 'released');
     fs.writeFileSync(lock, '');
-    const old = new Date(Date.now() - 60 * 1000);
+    const old = new Date(Date.now() - 5 * 1000);
     fs.utimesSync(lock, old, old);
     const again = acquireLock(lock, { timeoutMs: 50 });
     assert.ok(again, 'a stale lock from a crashed hook is broken');
     again();
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+}
+
+// A hook that cannot take the lock (another hook holds it) leaves the file untouched:
+// writing unlocked could replace that hook's waiting request.
+function testContendedUpdateIsSkipped() {
+  const { root, dir } = tmpStateDir();
+  try {
+    applySignals('claude', [{ type: SIGNAL.REQUEST_OPEN, sessionId: 's1', requestId: 'r1' }], { stateDir: dir, pid: null });
+    const file = path.join(dir, stateFileName('claude', 's1'));
+    const before = fs.readFileSync(file, 'utf8');
+    const lock = path.join(dir, `.${stateFileName('claude', 's1')}.lock`);
+    fs.writeFileSync(lock, '');
+    const outcomes = [];
+    const written = applySignals('claude', [{ type: SIGNAL.REQUEST_OPEN, sessionId: 's1', requestId: 'r2' }], { stateDir: dir, pid: null, lockTimeoutMs: 50, outcomes });
+    assert.deepStrictEqual(written, [], 'no update without the lock');
+    assert.deepStrictEqual(outcomes, ['busy'], 'reported as busy');
+    assert.strictEqual(fs.readFileSync(file, 'utf8'), before, 'the file is untouched');
+    assert.ok(fs.existsSync(lock), "another hook's lock is not removed");
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+}
+
+function testFailedWriteLeavesNoTemporaryFile() {
+  const { root, dir } = tmpStateDir();
+  try {
+    fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+    const file = path.join(dir, 'claude_s1.json');
+    fs.writeFileSync(file, '{"old":true}');
+    for (const failing of ['writeFileSync', 'renameSync']) {
+      const fake = { ...fs, [failing]: () => { throw Object.assign(new Error('ENOSPC'), { code: 'ENOSPC' }); } };
+      assert.throws(() => writeStateFile(dir, file, { a: 1 }, fake), /ENOSPC/);
+      assert.deepStrictEqual(fs.readdirSync(dir), ['claude_s1.json'], `${failing} failure leaves no temporary file`);
+      assert.strictEqual(fs.readFileSync(file, 'utf8'), '{"old":true}', 'the previous state is kept');
+    }
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
@@ -77,12 +115,19 @@ function testReadStateFileSafety() {
   try {
     fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
     const file = path.join(dir, 'claude_s1.json');
-    fs.writeFileSync(file, JSON.stringify({ session_id: 's1', agent: 'claude', status: 'cooking' }));
+    fs.writeFileSync(file, JSON.stringify({ session_id: 's1', agent: 'claude', status: 'cooking' }), { mode: 0o600 });
+    assert.strictEqual(readStateFile(file, { sessionId: 's1', agent: 'claude' }).status, 'cooking');
+    fs.chmodSync(file, 0o644);
+    assert.strictEqual(readStateFile(file, { sessionId: 's1', agent: 'claude' }), null, 'readable by others');
+    fs.chmodSync(file, 0o600);
+    fs.linkSync(file, path.join(root, 'hardlink.json'));
+    assert.strictEqual(readStateFile(file, { sessionId: 's1', agent: 'claude' }), null, 'hard-linked');
+    fs.unlinkSync(path.join(root, 'hardlink.json'));
     assert.strictEqual(readStateFile(file, { sessionId: 's1', agent: 'claude' }).status, 'cooking');
     assert.strictEqual(readStateFile(file, { sessionId: 's1', agent: 'gemini' }), null, 'other agent');
     assert.strictEqual(readStateFile(file, { sessionId: 's2', agent: 'claude' }), null, 'other session');
     const target = path.join(root, 'elsewhere.json');
-    fs.writeFileSync(target, JSON.stringify({ session_id: 's3', agent: 'claude', status: 'done' }));
+    fs.writeFileSync(target, JSON.stringify({ session_id: 's3', agent: 'claude', status: 'done' }), { mode: 0o600 });
     fs.symlinkSync(target, path.join(dir, 'claude_s3.json'));
     assert.strictEqual(readStateFile(path.join(dir, 'claude_s3.json'), { sessionId: 's3', agent: 'claude' }), null, 'symlinks are not followed');
     fs.writeFileSync(path.join(dir, 'claude_s4.json'), 'x'.repeat(300 * 1024));
@@ -104,7 +149,12 @@ function testApplySignalsWritesReadableState() {
     assert.strictEqual(session.agent, 'claude');
     assert.strictEqual(session.pid, process.pid);
 
-    applySignals('claude', [{ type: SIGNAL.TURN_COMPLETE, sessionId: 's1' }], { stateDir: dir, now: 2000, pid: process.pid });
+    const outcomes = [];
+    applySignals('claude', [{ type: SIGNAL.TURN_COMPLETE, sessionId: 's1' }], { stateDir: dir, now: 2000, pid: process.pid, outcomes });
+    applySignals('claude', [{ type: SIGNAL.TURN_COMPLETE, sessionId: 's1' }], { stateDir: dir, now: 2001, pid: process.pid, outcomes });
+    applySignals('claude', [{ type: SIGNAL.ACTIVITY, sessionId: 's1' }, { type: 'bogus', sessionId: 's1' }, { type: SIGNAL.ACTIVITY, sessionId: '../x' }],
+      { stateDir: dir, now: 2002, pid: process.pid, outcomes });
+    assert.deepStrictEqual(outcomes, ['written', 'unchanged', 'ignored', 'ignored', 'ignored'], 'one outcome per signal');
     assert.strictEqual(readAllSessionsFromDir(dir, { now: 2000, isPidAlive: () => true })[0].status, STATUS.DONE);
 
     const before = fs.statSync(file).mtimeMs;
@@ -157,6 +207,32 @@ async function testRunHookNeverThrows() {
   }
 }
 
+async function testAdapterTargetsAndFileNames() {
+  const { root, dir } = tmpStateDir();
+  try {
+    const stdin = text => Readable.from([Buffer.from(text)]);
+    const routed = {
+      id: 'router',
+      maxInputBytes: 64,
+      target: input => (input.ok ? { agent: input.agent, fileName: sid => `@${input.agent}.${sid}.json`, pid: 77 } : null),
+      toSignals: input => [{ type: SIGNAL.TURN_START, sessionId: input.session_id }],
+    };
+    await runHook(routed, { stdin: stdin('{"ok":true,"agent":"tool","session_id":"s1"}'), stateDir: dir, pid: null });
+    const state = JSON.parse(fs.readFileSync(path.join(dir, '@tool.s1.json'), 'utf8'));
+    assert.strictEqual(state.agent, 'tool', 'the target names the agent');
+    assert.strictEqual(state.pid, 77, 'and may name the pid');
+    assert.deepStrictEqual(await runHook(routed, { stdin: stdin('{"ok":false,"agent":"x","session_id":"s2"}'), stateDir: dir, pid: null }), [], 'rejected target');
+    assert.deepStrictEqual(await runHook(routed, { stdin: stdin(`{"ok":true,"agent":"tool","session_id":"s3","pad":"${'x'.repeat(80)}"}`), stateDir: dir, pid: null }), [], 'adapter input limit');
+
+    for (const bad of [() => '../x.json', () => 'a/b.json', () => '.hidden.json', () => 'x.txt', () => 42]) {
+      assert.deepStrictEqual(applySignals('a', [{ type: SIGNAL.TURN_START, sessionId: 's9' }], { stateDir: dir, pid: null, fileName: bad }), [], `unsafe file name ${bad()}`);
+    }
+    assert.deepStrictEqual(fs.readdirSync(dir).sort(), ['@tool.s1.json']);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+}
+
 // Hook processes for parallel tool calls run at the same time. Without the lock their
 // read-modify-write cycles would lose requests.
 async function testConcurrentHooksKeepEveryRequest() {
@@ -188,10 +264,13 @@ async function run() {
   await testBoundedStdin();
   testFindAgentPid();
   testLocking();
+  testContendedUpdateIsSkipped();
+  testFailedWriteLeavesNoTemporaryFile();
   testReadStateFileSafety();
   testApplySignalsWritesReadableState();
   testUntrustedStateDirIsRefused();
   await testRunHookNeverThrows();
+  await testAdapterTargetsAndFileNames();
   await testConcurrentHooksKeepEveryRequest();
   console.log('All LetItCook hook bridge tests passed.');
 }

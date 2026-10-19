@@ -96,6 +96,13 @@ export function normalizeSession(raw, options = {}) {
     }
   }
 
+  // A session without a process to watch cannot be checked for liveness (a killed agent
+  // never reports its end), so it is removed one hour after its last update whatever its
+  // status, an unanswered Your Turn included. It is never relabelled on a timer.
+  if (!terminated && !hasPid && now - updatedAt > DEAD_SESSION_RETENTION_MS) {
+    terminated = true;
+  }
+
   // Only Cooking goes stale: without new events there is no evidence of work. An
   // unanswered Your Turn is still the user's turn however long it waits; it ends with a
   // new event, its process exiting (above) or the session being removed.

@@ -13,6 +13,7 @@ import { applySignals, readStateFile, stateFileName } from '../src/hooks/bridge.
 import { claudeHooks, ClaudeAdapter } from '../src/adapters/claude/hooks.js';
 import { codexHooks, CodexAdapter } from '../src/adapters/codex/hooks.js';
 import { geminiHooks, GeminiAdapter } from '../src/adapters/gemini/hooks.js';
+import { protocolHooks, ProtocolAdapter } from '../src/protocol/adapter.js';
 
 // Applies a fixture that may be a single event or a sequence of events.
 function sequenced(stepOne) {
@@ -72,6 +73,7 @@ export const openCodeSpec = {
   },
   malformed: [{ type: 42 }, { type: '' }, { type: 'message.updated', properties: null }, { type: 'totally.unknown', properties: { sessionID: 's1' } }],
   expect: { cancel: STATUS.BURN },
+  capabilities: ['cancel', 'complete', 'fail', 'requests'],
   notes: {
     lateToolEvent: 'tool hooks run inline in the agent loop, so one after Done is new work, not a late event',
   },
@@ -105,6 +107,7 @@ export const copilotSpec = {
   },
   malformed: [{ type: 'assistant.turn_start', data: null }, { type: 7 }, { type: 'totally.unknown', data: { sessionId: 's1' } }],
   expect: { cancel: STATUS.YOUR_TURN },
+  capabilities: ['cancel', 'complete', 'fail', 'requests'],
   notes: {
     lateToolEvent: 'events are replayed from an append-only log in order, so a tool event after task_complete was recorded later',
   },
@@ -114,11 +117,20 @@ export const copilotSpec = {
 };
 
 // --- Hook adapters (src/hooks/bridge.js + the shared lifecycle reducer) ---
+// Where a hook adapter routes an input: its own agent id and file, or, for the generic
+// protocol, the agent and file named by the event (null when rejected).
+function hookTarget(hooks, input, now) {
+  if (typeof hooks.target !== 'function') return { agent: hooks.id, fileName: sid => stateFileName(hooks.id, sid) };
+  return hooks.target(input, now);
+}
+
 function hookStep(hooks) {
   return sequenced((prev, input, now) => {
+    const target = hookTarget(hooks, input, now);
+    if (!target) return null;
     let state = prev;
-    for (const signal of hooks.toSignals(input)) {
-      const next = reduceSession(state && !state.deleted ? state : null, signal, { agent: hooks.id, now });
+    for (const signal of hooks.toSignals(input, now)) {
+      const next = reduceSession(state && !state.deleted ? state : null, signal, { agent: target.agent, now });
       if (next) state = next;
     }
     return state === prev ? null : state;
@@ -129,13 +141,19 @@ function hookReplayThroughFiles(hooks) {
   return (sid, events) => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), `letitcook-conformance-${hooks.id}-`));
     try {
+      let file = null;
+      let agent = null;
       return events.map((event) => {
         for (const input of Array.isArray(event) ? event : [event]) {
-          applySignals(hooks.id, hooks.toSignals(input), { stateDir: dir, pid: null });
+          const now = Date.now();
+          const target = hookTarget(hooks, input, now);
+          if (!target) continue;
+          agent = target.agent;
+          file = path.join(dir, target.fileName(sid));
+          applySignals(target.agent, hooks.toSignals(input, now), { stateDir: dir, pid: null, fileName: target.fileName });
         }
-        const file = path.join(dir, stateFileName(hooks.id, sid));
-        if (!fs.existsSync(file)) return 'removed';
-        return readStateFile(file, { sessionId: sid, agent: hooks.id }).status;
+        if (!file || !fs.existsSync(file)) return 'removed';
+        return readStateFile(file, { sessionId: sid, agent }).status;
       });
     } finally {
       fs.rmSync(dir, { recursive: true, force: true });
@@ -170,6 +188,7 @@ export const claudeSpec = {
   },
   expect: { cancel: STATUS.YOUR_TURN },
   malformed: [{ hook_event_name: 'PreToolUse' }, { hook_event_name: 'Stop', session_id: '../x' }, { hook_event_name: ['Stop'], session_id: 's1' }],
+  capabilities: claudeHooks.capabilities,
   createAdapter: () => new ClaudeAdapter(),
   binEnv: ['CLAUDE_BIN'],
   sourceFiles: ['src/adapters/claude/hooks.js', 'src/adapters/hook-adapter.js', 'src/adapters/hook-input.js', 'src/core/lifecycle.js'],
@@ -204,6 +223,7 @@ export const codexSpec = {
   },
   expect: { cancel: STATUS.YOUR_TURN },
   malformed: [{ hook_event_name: 'PreToolUse' }, { hook_event_name: 'Stop', session_id: '../x' }, { hook_event_name: { a: 1 }, session_id: 's1' }],
+  capabilities: codexHooks.capabilities,
   createAdapter: () => new CodexAdapter(),
   binEnv: ['CODEX_BIN'],
   sourceFiles: ['src/adapters/codex/hooks.js', 'src/adapters/hook-adapter.js', 'src/adapters/hook-input.js', 'src/core/lifecycle.js'],
@@ -240,12 +260,70 @@ export const geminiSpec = {
     unrelatedActivity: 'Gemini executes no tool of a batch while one of its calls awaits confirmation, so a tool finishing is the resolution',
   },
   malformed: [{ hook_event_name: 'BeforeTool' }, { hook_event_name: 'BeforeAgent', session_id: '../x' }, { hook_event_name: null, session_id: 's1' }],
+  capabilities: geminiHooks.capabilities,
   createAdapter: () => new GeminiAdapter(),
   binEnv: ['GEMINI_BIN'],
   sourceFiles: ['src/adapters/gemini/hooks.js', 'src/adapters/hook-adapter.js', 'src/adapters/hook-input.js', 'src/core/lifecycle.js'],
 };
 
-export const SPECS = [openCodeSpec, copilotSpec, claudeSpec, codexSpec, geminiSpec];
+// --- Generic event protocol (src/protocol, docs/protocol.md) ---
+// Two synthetic producers: one that reports every outcome, and a limited one that cannot
+// tell success from failure and ends turns with turn.ended.
+function protocolSpec(agent, capabilities) {
+  let n = 0;
+  const turns = new Map();
+  const ev = (type, sid, extra = {}) => ({
+    schema: 1, agent, session_id: sid, event_id: `${agent}-${++n}`, type, time: Date.now(),
+    // Free text a careless producer might add: dropped by the schema, never stored.
+    prompt: SECRET, ...extra,
+  });
+  const turn = sid => ({ turn_id: turns.get(sid) || 't0' });
+  const can = c => capabilities.includes(c);
+  return {
+    id: agent,
+    step: hookStep(protocolHooks),
+    replayThroughFiles: hookReplayThroughFiles(protocolHooks),
+    capabilities,
+    fixtures: {
+      promptSubmit: (sid) => {
+        turns.set(sid, `t${++n}`);
+        return ev('turn.started', sid, { ...turn(sid), capabilities, cwd: '/work' });
+      },
+      toolStart: sid => ev('activity', sid, { subject: 'shell' }),
+      toolEnd: sid => ev('activity', sid, { subject: 'shell' }),
+      permissionAsk: (sid, i) => (can('requests') ? ev('request.opened', sid, { ...turn(sid), request_id: `p${i}`, kind: 'permission', subject: 'shell' }) : null),
+      permissionResolve: (sid, i) => (can('requests') ? ev('request.resolved', sid, { request_id: `p${i}`, outcome: 'approved' }) : null),
+      questionAsk: (sid, i) => (can('requests') ? ev('request.opened', sid, { ...turn(sid), request_id: `q${i}`, kind: 'question' }) : null),
+      questionResolve: (sid, i) => (can('requests') ? ev('request.resolved', sid, { request_id: `q${i}`, outcome: 'answered' }) : null),
+      turnComplete: sid => (can('complete') ? ev('turn.completed', sid, turn(sid)) : null),
+      turnEndUnknown: sid => ev('turn.ended', sid, turn(sid)),
+      failure: sid => (can('fail') ? ev('turn.failed', sid, { ...turn(sid), error_code: 'rate_limit' }) : null),
+      cancel: sid => (can('cancel') ? ev('turn.cancelled', sid, turn(sid)) : null),
+      sessionEnd: sid => ev('session.ended', sid),
+      subagentActivity: sid => ev('subagent.started', sid, { subagent_id: 'sub-1' }),
+      subagentComplete: sid => ev('turn.completed', sid, { ...turn(sid), subagent_id: 'sub-1' }),
+      subagentFailure: sid => ev('turn.failed', sid, { ...turn(sid), subagent_id: 'sub-1', error_code: 'boom' }),
+    },
+    malformed: [
+      { schema: 2, agent, session_id: 's1', event_id: 'x', type: 'turn.completed', time: Date.now() },
+      { schema: 1, agent: 'claude', session_id: 's1', event_id: 'x', type: 'turn.completed', time: Date.now() },
+      { schema: 1, agent, session_id: '../s1', event_id: 'x', type: 'turn.completed', time: Date.now() },
+      { schema: 1, agent, session_id: 's1', type: 'turn.completed', time: Date.now() },
+      { schema: 1, agent, session_id: 's1', event_id: 'x', type: 'turn.completed', time: 1 },
+      { schema: 1, agent, session_id: 's1', event_id: 'x', type: 'turn.future', time: Date.now() },
+    ],
+    expect: { cancel: STATUS.YOUR_TURN },
+    adapterId: 'protocol',
+    createAdapter: () => new ProtocolAdapter(),
+    sourceFiles: ['src/protocol/schema.js', 'src/protocol/adapter.js', 'src/core/lifecycle.js'],
+  };
+}
+
+export const SPECS = [
+  openCodeSpec, copilotSpec, claudeSpec, codexSpec, geminiSpec,
+  protocolSpec('full-cli', ['cancel', 'complete', 'fail', 'requests']),
+  protocolSpec('limited-cli', ['requests']),
+];
 
 function run() {
   for (const spec of SPECS) {

@@ -1,5 +1,5 @@
 import assert from 'node:assert';
-import { SIGNAL, validateSignal, reduceSession, shouldPersist, HEARTBEAT_MS } from '../src/core/lifecycle.js';
+import { SIGNAL, CAPABILITY, validateSignal, reduceSession, shouldPersist, HEARTBEAT_MS } from '../src/core/lifecycle.js';
 import { STATUS, normalizeSession } from '../src/core/status.js';
 
 const SID = 'sess-1';
@@ -147,6 +147,175 @@ function testDuplicateAndReorderedRequests() {
   assert.ok(many.lifecycle.closed.length <= 32, 'resolved-request memory is bounded');
 }
 
+// Optional ordering metadata (event ids, turn ids, producer times) used by the generic
+// protocol. Native adapters do not send it and are unaffected.
+function testEventOrderingMetadata() {
+  // Duplicate event ids are ignored, also for state-changing events.
+  const dup = run([
+    { type: SIGNAL.TURN_START, eventId: 'e1', turnId: 't1', at: 100 },
+    { type: SIGNAL.TURN_COMPLETE, eventId: 'e2', turnId: 't1', at: 200 },
+    { type: SIGNAL.TURN_START, eventId: 'e3', turnId: 't2', at: 300 },
+    { type: SIGNAL.TURN_COMPLETE, eventId: 'e2', turnId: 't2', at: 400 },
+  ]).state;
+  assert.strictEqual(dup.status, STATUS.COOKING, 'a replayed event id does not complete the new turn');
+
+  // A completion of the previous turn arriving late does not complete the current one.
+  const lateTurn = run([
+    { type: SIGNAL.TURN_START, eventId: 'a', turnId: 't1', at: 100 },
+    { type: SIGNAL.TURN_START, eventId: 'b', turnId: 't2', at: 300 },
+    { type: SIGNAL.TURN_COMPLETE, eventId: 'c', turnId: 't1', at: 200 },
+    { type: SIGNAL.FAILURE, eventId: 'd', turnId: 't1', at: 250 },
+    { type: SIGNAL.REQUEST_OPEN, eventId: 'e', turnId: 't1', requestId: 'r-old' },
+  ]).state;
+  assert.strictEqual(lateTurn.status, STATUS.COOKING, 'late outcome and request of turn t1 are ignored');
+  assert.strictEqual(lateTurn.lifecycle.turn, 't2');
+
+  // Without turn ids, producer times still order turn starts and endings.
+  const lateStart = run([
+    { type: SIGNAL.TURN_START, eventId: 'a', at: 100 },
+    { type: SIGNAL.TURN_COMPLETE, eventId: 'b', at: 300 },
+    { type: SIGNAL.TURN_START, eventId: 'c', at: 200 },
+  ]).state;
+  assert.strictEqual(lateStart.status, STATUS.DONE, 'a turn start older than the completion does not reopen the turn');
+
+  // Requests and activity are not dropped for being older (parallel hooks).
+  const parallel = run([
+    { type: SIGNAL.TURN_START, eventId: 'a', turnId: 't1', at: 100 },
+    { type: SIGNAL.ACTIVITY, eventId: 'b', at: 300 },
+    { type: SIGNAL.REQUEST_OPEN, eventId: 'c', turnId: 't1', requestId: 'r1', at: 200 },
+  ]).state;
+  assert.strictEqual(parallel.status, STATUS.YOUR_TURN, 'an older request of the current turn still shows');
+
+  // Invalid metadata rejects the signal; absent metadata is fine.
+  for (const bad of [{ eventId: '../x' }, { eventId: 7 }, { turnId: '' }, { at: -1 }, { at: 1.5 }, { at: '100' }]) {
+    assert.strictEqual(reduceSession(null, { type: SIGNAL.TURN_START, sessionId: SID, ...bad }, ctx()), null, `rejects ${JSON.stringify(bad)}`);
+  }
+
+  // Bounded memory of applied ids.
+  const many = run(Array.from({ length: 200 }, (_, i) => ({ type: SIGNAL.ACTIVITY, eventId: `e${i}` }))).state;
+  assert.ok(many.lifecycle.seen.length <= 64);
+
+  // Recording an applied id alone is not worth a write.
+  const a = reduceSession(null, { type: SIGNAL.TURN_START, sessionId: SID, eventId: 'x1' }, ctx(1000));
+  const b = reduceSession(a, { type: SIGNAL.ACTIVITY, sessionId: SID, eventId: 'x2', reason: 'prompt submitted' }, ctx(2000));
+  assert.strictEqual(shouldPersist(a, b), false);
+}
+
+function testCapabilities() {
+  // A producer that cannot tell success from failure declares neither and ends turns
+  // without outcome; a stray completion is not trusted.
+  const limited = run([
+    { type: SIGNAL.TURN_START, capabilities: [CAPABILITY.REQUESTS] },
+    { type: SIGNAL.TURN_COMPLETE },
+    { type: SIGNAL.FAILURE },
+    { type: SIGNAL.CANCEL },
+  ]).state;
+  assert.strictEqual(limited.status, STATUS.COOKING, 'undeclared outcomes are ignored');
+  assert.deepStrictEqual(limited.capabilities, ['requests']);
+  assert.strictEqual(run([{ type: SIGNAL.TURN_END }], limited).state.status, STATUS.YOUR_TURN, 'turn end is always allowed');
+  const noRequests = run([{ type: SIGNAL.TURN_START, capabilities: [CAPABILITY.COMPLETE] }, { type: SIGNAL.REQUEST_OPEN, requestId: 'r' }]).state;
+  assert.strictEqual(noRequests.status, STATUS.COOKING, 'requests need the requests capability');
+
+  // A later declaration replaces the earlier one; metadata never changes the status.
+  const declared = run([{ type: SIGNAL.TURN_START }, { type: SIGNAL.METADATA, capabilities: ['complete', 'fail', 'complete'], cwd: '/w' }]).state;
+  assert.strictEqual(declared.status, STATUS.COOKING);
+  assert.deepStrictEqual(declared.capabilities, ['complete', 'fail'], 'deduplicated and sorted');
+  assert.strictEqual(declared.cwd, '/w');
+  assert.strictEqual(run([{ type: SIGNAL.TURN_COMPLETE }], declared).state.status, STATUS.DONE);
+  assert.strictEqual(reduceSession(null, { type: SIGNAL.METADATA, sessionId: SID, capabilities: [] }, ctx()), null, 'metadata alone creates no session');
+
+  // Without a declaration nothing is restricted (native adapters).
+  assert.strictEqual(run([{ type: SIGNAL.TURN_START }, { type: SIGNAL.TURN_COMPLETE }]).state.status, STATUS.DONE);
+  assert.ok(!('capabilities' in run([{ type: SIGNAL.TURN_START }]).state));
+
+  for (const bad of ['complete', ['done'], [1], ['requests', 'complete', 'fail', 'cancel', 'requests']]) {
+    assert.strictEqual(validateSignal({ type: SIGNAL.TURN_START, sessionId: SID, capabilities: bad }), null, `rejects ${JSON.stringify(bad)}`);
+  }
+}
+
+// A request delivered after its turn ended, but sent before that, is late: it cannot turn
+// the finished turn back into Your Turn (Devin review on PR #7).
+function testLateRequestsAfterTheTurnEnded() {
+  for (const ending of [SIGNAL.TURN_COMPLETE, SIGNAL.FAILURE, SIGNAL.TURN_END, SIGNAL.CANCEL]) {
+    const finished = run([
+      { type: SIGNAL.TURN_START, turnId: 't1', at: 100 },
+      { type: ending, turnId: 't1', at: 300 },
+    ]).state;
+    for (const turnId of ['t1', undefined]) {
+      const late = run([{ type: SIGNAL.REQUEST_OPEN, turnId, requestId: 'r1', at: 200 }], finished).state;
+      assert.deepStrictEqual([late.status, late.reason], [finished.status, finished.reason], `${ending}: a request older than the end is ignored`);
+    }
+    // Requests sent after the end, and requests of a new turn, still show.
+    assert.strictEqual(run([{ type: SIGNAL.REQUEST_OPEN, turnId: 't1', requestId: 'r2', at: 400 }], finished).state.status, STATUS.YOUR_TURN);
+    const next = run([
+      { type: SIGNAL.TURN_START, turnId: 't2', at: 500 },
+      { type: SIGNAL.REQUEST_OPEN, turnId: 't2', requestId: 'r3', at: 450 },
+    ], finished).state;
+    assert.strictEqual(next.status, STATUS.YOUR_TURN, `${ending}: the new turn's requests are not compared with the old end`);
+    assert.strictEqual(next.lifecycle.endedAt, undefined);
+  }
+  // Without producer times (native adapters) nothing changes.
+  assert.strictEqual(run([{ type: SIGNAL.TURN_START }, { type: SIGNAL.TURN_COMPLETE }, { type: SIGNAL.REQUEST_OPEN, requestId: 'r' }]).state.status, STATUS.YOUR_TURN);
+}
+
+// Activity sent before the turn ended (delivered late) does not turn a turn that ended
+// without outcome, or was cancelled, back into Cooking (Devin review on PR #7).
+function testLateActivityAfterTheTurnEnded() {
+  for (const ending of [SIGNAL.TURN_END, SIGNAL.CANCEL, SIGNAL.TURN_COMPLETE, SIGNAL.FAILURE]) {
+    const finished = run([{ type: SIGNAL.TURN_START, turnId: 't1', at: 100 }, { type: ending, turnId: 't1', at: 300 }]).state;
+    for (const extra of [{}, { subagent: true }, { revive: true }]) {
+      const late = run([{ type: SIGNAL.ACTIVITY, at: 200, ...extra }], finished).state;
+      assert.strictEqual(late.status, finished.status, `${ending}: older activity ${JSON.stringify(extra)} is ignored`);
+    }
+  }
+  // Activity after the end still counts where it did before (Your Turn -> Cooking), and a
+  // new turn's activity is never compared with the old end.
+  const ended = run([{ type: SIGNAL.TURN_START, turnId: 't1', at: 100 }, { type: SIGNAL.TURN_END, turnId: 't1', at: 300 }]).state;
+  assert.strictEqual(run([{ type: SIGNAL.ACTIVITY, at: 400 }], ended).state.status, STATUS.COOKING);
+  assert.strictEqual(run([{ type: SIGNAL.TURN_START, turnId: 't2', at: 500 }, { type: SIGNAL.ACTIVITY, at: 450 }], ended).state.status, STATUS.COOKING);
+  // Without producer times (native adapters) nothing changes.
+  assert.strictEqual(run([{ type: SIGNAL.TURN_START }, { type: SIGNAL.TURN_END }, { type: SIGNAL.ACTIVITY }]).state.status, STATUS.COOKING);
+}
+
+// A session end from an earlier run of the session, delivered after the producer resumed
+// it, must not remove the resumed session (Devin review on PR #7).
+function testLateSessionEndAfterResume() {
+  const resumed = run([
+    { type: SIGNAL.TURN_START, turnId: 't1', at: 100, eventId: 'a1' },
+    { type: SIGNAL.TURN_COMPLETE, turnId: 't1', at: 150, eventId: 'a2' },
+    { type: SIGNAL.TURN_START, turnId: 't2', at: 300, eventId: 'b1' },
+  ]).state;
+  const lateEnd = reduceSession(resumed, { type: SIGNAL.SESSION_END, sessionId: SID, at: 200, eventId: 'a3' }, ctx());
+  assert.strictEqual(lateEnd, null, 'an end older than the resumed turn is ignored');
+  const duplicate = reduceSession(resumed, { type: SIGNAL.SESSION_END, sessionId: SID, at: 400, eventId: 'b1' }, ctx());
+  assert.strictEqual(duplicate, null, 'a duplicate event id is ignored for session ends too');
+  assert.ok(reduceSession(resumed, { type: SIGNAL.SESSION_END, sessionId: SID, at: 400, eventId: 'b2' }, ctx()).deleted, 'a newer end removes it');
+  assert.ok(reduceSession(resumed, { type: SIGNAL.SESSION_END, sessionId: SID }, ctx()).deleted, 'an end without producer time (native) removes it');
+  assert.ok(reduceSession(null, { type: SIGNAL.SESSION_END, sessionId: SID, at: 50 }, ctx()).deleted, 'an end without a preceding turn is still accepted');
+  // An end with the same time as the turn event is not older.
+  assert.ok(reduceSession(resumed, { type: SIGNAL.SESSION_END, sessionId: SID, at: 300 }, ctx()).deleted);
+}
+
+// Request ids are producer data: inherited object member names must be ordinary keys
+// (Devin review on PR #7).
+function testPrototypeSensitiveRequestIds() {
+  for (const id of ['__proto__', 'constructor', 'toString', 'hasOwnProperty', 'valueOf']) {
+    const waiting = run([{ type: SIGNAL.TURN_START }, { type: SIGNAL.REQUEST_OPEN, requestId: id, reason: 'permission:x' }, { type: SIGNAL.ACTIVITY }]).state;
+    assert.strictEqual(waiting.status, STATUS.YOUR_TURN, `${id}: still waiting after activity`);
+    assert.deepStrictEqual(Object.keys(waiting.lifecycle.pending), [id], `${id}: recorded as an own entry`);
+    // It survives the state file (JSON) and is resolved by its own id only.
+    const reloaded = JSON.parse(JSON.stringify(waiting));
+    assert.strictEqual(run([{ type: SIGNAL.ACTIVITY }], reloaded).state.status, STATUS.YOUR_TURN, `${id}: still waiting after a reload`);
+    assert.strictEqual(run([{ type: SIGNAL.REQUEST_CLOSE, requestId: id }], reloaded).state.status, STATUS.COOKING, `${id}: resolved by its id`);
+    // Resolving an inherited name that is not waiting changes nothing.
+    const cancelled = run([{ type: SIGNAL.TURN_START }, { type: SIGNAL.CANCEL }, { type: SIGNAL.REQUEST_CLOSE, requestId: id }]).state;
+    assert.strictEqual(cancelled.status, STATUS.YOUR_TURN, `${id}: an unknown resolution is not taken for a waiting one`);
+  }
+  // A crafted state file cannot inject non-string entries.
+  const crafted = { session_id: SID, agent: 'test', status: STATUS.YOUR_TURN, lifecycle: { pending: { a: 'permission:x', b: { evil: 1 } }, closed: [] } };
+  assert.deepStrictEqual(Object.keys(run([{ type: SIGNAL.ACTIVITY }], crafted).state.lifecycle.pending), ['a']);
+}
+
 function testSubagentsNeverSettleTheParent() {
   for (const type of [SIGNAL.TURN_COMPLETE, SIGNAL.TURN_END, SIGNAL.FAILURE, SIGNAL.CANCEL, SIGNAL.SESSION_END]) {
     const { state } = run([{ type: SIGNAL.TURN_START }, { type, subagent: true }]);
@@ -193,6 +362,12 @@ function run_() {
   testTerminalStatesResistLateEvents();
   testRequestsAreNotHiddenByActivity();
   testDuplicateAndReorderedRequests();
+  testEventOrderingMetadata();
+  testCapabilities();
+  testPrototypeSensitiveRequestIds();
+  testLateRequestsAfterTheTurnEnded();
+  testLateActivityAfterTheTurnEnded();
+  testLateSessionEndAfterResume();
   testSubagentsNeverSettleTheParent();
   testSessionEndNeverCompletes();
   testSessionsAreIsolated();

@@ -141,7 +141,7 @@ Then restart GNOME Shell so it loads the new code. On X11, press Alt + F2, type 
 
 ### Creating a new adapter (e.g., ForAgentX)
 
-If the agent runs a command per lifecycle event (hooks), write a hook adapter instead: a pure `toSignals(input)` mapping to the shared lifecycle signals, registered in `src/hooks/adapters.js`, plus a spec in `test/test-adapter-conformance.js`. The bridge, state rules, locking and file safety are shared. See [docs/adapters.md](docs/adapters.md#adding-an-adapter). Every adapter, whatever its kind, must pass the conformance suite (`node test/test-adapter-conformance.js`).
+If you control a plugin, wrapper or the CLI itself, it can report through the [event protocol](docs/protocol.md) without any LetItCook code; validate its events with `node src/protocol/validate.js`. If the agent runs a command per lifecycle event (its own hooks), write a hook adapter instead: a pure `toSignals(input)` mapping to the shared lifecycle signals, registered in `src/hooks/adapters.js`, plus a spec in `test/test-adapter-conformance.js`. The bridge, state rules, locking and file safety are shared. See [docs/adapters.md](docs/adapters.md#adding-an-adapter). Every adapter, whatever its kind, must pass the conformance suite (`node test/test-adapter-conformance.js`).
 
 For other mechanisms (in-process plugins, logs replayed by `src/sync.js`):
 
