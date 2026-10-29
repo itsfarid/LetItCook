@@ -3,7 +3,7 @@
 Attention indicator for AI coding agents running in the terminal.
 GNOME Shell top-panel indicator: 🟡Cooking · 🟠Your Turn · 🟢Done · 🔴Burn · ⚪Unknown
 
-LetItCook listens to agent events (OpenCode plugin hooks, Copilot CLI event logs) and writes normalized session state files to a shared state directory. The GNOME Shell extension reads these files to update the panel indicator and handle notifications.
+LetItCook listens to agent events (an OpenCode plugin, Copilot CLI event logs, Claude Code, Codex CLI and Gemini CLI hooks, and a generic event protocol) and writes normalized session state files to a shared state directory. The GNOME Shell extension reads these files to update the panel indicator and handle notifications.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Node.js](https://img.shields.io/badge/Node.js-&gt;=20.3-brightgreen.svg)](https://nodejs.org/)
@@ -30,15 +30,37 @@ When a supported agent requires user interaction, LetItCook can display a GNOME 
 
 ## Supported agents
 
-| Agent | Status | State source |
+LetItCook integrates with agents in two ways: **native adapters**, which map an agent's own official hooks or event logs, and the **event protocol**, a generic way for any plugin, wrapper or CLI to report its sessions. Not every integration can report every state. Where an agent gives no reliable signal for a state, LetItCook does not show that state for it and falls back to `Unknown` instead of guessing. See the [status model](#status-model) for what each state means.
+
+### Native adapters
+
+| Agent | State source | How it has been checked |
 |---|---|---|
-| OpenCode | ✅ Supported | Official plugin events (event, tool.execute.before/after hooks) writing to state dir |
-| GitHub Copilot CLI | ✅ Supported | Session-event log replay (`~/.copilot/session-state/*/events.jsonl` + `workspace.yaml`) via polling |
-| Claude Code | 🧪 New, fixture-tested only | Official command hooks (`UserPromptSubmit`, tool, permission, `Stop`/`StopFailure`, subagent and session events) |
-| Codex CLI | 🧪 New, fixture-tested only | Official command hooks (`UserPromptSubmit`, tool, `PermissionRequest`, `Stop`, `Interrupt`, subagent and session events); never `Burn` |
-| Gemini CLI | 🧪 New, fixture-tested only, partial | Official command hooks; every finished turn is `Your Turn` (never `Done` or `Burn`) |
-| Other CLIs | 🧪 Event protocol, reference producer only | Any plugin, wrapper or CLI can report sessions through the [LetItCook event protocol](docs/protocol.md) with no LetItCook change; no third-party CLI verified yet |
-| Goose | ⏸️ Deferred | No hook fires for approval requests; see [docs/adapters.md](docs/adapters.md#goose-deferred) |
+| OpenCode | Official plugin events (`event`, `tool.execute.before/after` hooks) writing to the state dir | Run against the real CLI (including `npm run selftest`) and seen in the panel on GNOME 43 |
+| GitHub Copilot CLI | Session-event log replay (`~/.copilot/session-state/*/events.jsonl` + `workspace.yaml`) by `node src/sync.js --watch` | Mapped from the official event schema and replayed against real local session logs |
+| Claude Code | Official command hooks (`UserPromptSubmit`, tool, permission, `Stop`/`StopFailure`, subagent and session events) | 🧪 Fixture-tested only; not run against the real CLI or checked in GNOME |
+| Codex CLI | Official command hooks (`UserPromptSubmit`, tool, `PermissionRequest`, `Stop`, `Interrupt`, subagent and session events) | 🧪 Fixture-tested only; not run against the real CLI or checked in GNOME |
+| Gemini CLI | Official command hooks (`BeforeAgent`, tool events, `Notification`, `AfterAgent`, `SessionEnd`) | 🧪 Fixture-tested only; not run against the real CLI or checked in GNOME |
+
+Which states each adapter can report (every adapter can also fall back to ⚪ Unknown):
+
+| Agent | 🟡 Cooking | 🟠 Your Turn | 🟢 Done | 🔴 Burn |
+|---|---|---|---|---|
+| OpenCode | ✅ | ✅ Permissions and questions | ✅ Completed reply followed by idle | ✅ `session.error` (a cancelled prompt also shows as Burn) |
+| GitHub Copilot CLI | ✅ | ✅ Permissions, input and elicitation requests; also every finished turn | ⚠️ Only on `session.task_complete` with `success: true`, which is rare | ✅ Session errors, failed tasks, shutdown with an error |
+| Claude Code | ✅ | ✅ Permissions, questions, elicitations, interrupts | ✅ `Stop` | ✅ `StopFailure` |
+| Codex CLI | ✅ | ⚠️ Permissions and interrupts; questions (`request_user_input`) are not shown | ✅ `Stop` | ❌ No hook reports a failed turn |
+| Gemini CLI | ✅ | ⚠️ Permissions and questions; also every finished turn, because the end-of-turn hook has no outcome | ❌ | ❌ |
+
+### Event protocol (generic)
+
+The [LetItCook event protocol](docs/protocol.md) is a generic integration mechanism, not a list of supported CLIs. **No third-party CLI has been verified with it yet**; it has been tested with synthetic events and the bundled reference producer. A producer declares which outcomes it can report, and LetItCook ignores outcome events it did not declare. See [Other CLIs: the event protocol](#other-clis-the-event-protocol) under Installation for how to use it.
+
+### Deferred
+
+| Agent | Why |
+|---|---|
+| Goose | No hook fires while Goose waits for tool approval, and its `Stop` hook has no outcome, so it could show Cooking while it actually needs you. See [docs/adapters.md](docs/adapters.md#goose-deferred). |
 
 See [docs/adapters.md](docs/adapters.md) for how each agent's events map to the states, what each one cannot report, and how adapters are tested. [AGENTS.md §28](AGENTS.md#28-agent-adapter-status) has the per-state reliability notes.
 
@@ -151,13 +173,21 @@ Review it and merge its `hooks` entries into `~/.gemini/settings.json`, then res
 
 ### Other CLIs: the event protocol
 
-A CLI without a native adapter can report its sessions through the [LetItCook event protocol](docs/protocol.md). Its plugin, wrapper or the CLI itself runs `node src/hooks/hook.js event` with one JSON event on stdin, or uses `src/protocol/sdk.js` from Node.js. To see what it looks like without any model or API key, run the reference producer and watch the panel:
+A CLI without a native adapter can report its sessions through the [LetItCook event protocol](docs/protocol.md). This is how a third-party integration plugs in; it does not mean any particular CLI already works with LetItCook.
+
+- **Schema.** Each event is a small JSON object with `schema: 1`, a producer `agent` id, a `session_id`, a unique `event_id`, a `type` such as `turn.started`, `request.opened`, `turn.completed`, `turn.failed`, `turn.cancelled` or `turn.ended`, and a `time`. Events never carry prompts, commands, tool input or output, or credentials.
+- **Delivery.** The plugin, wrapper or CLI runs `node src/hooks/hook.js event` with one JSON event (at most 16 KiB) on stdin. The command prints nothing and always exits 0; invalid events are dropped. LetItCook chooses the session file path, never the producer.
+- **Capabilities.** A producer declares the outcomes it can actually report (`requests`, `complete`, `fail`, `cancel`). Outcome events it did not declare are ignored. A producer that cannot tell success from failure sends `turn.ended`, which shows Your Turn rather than claiming Done.
+- **SDK.** From Node.js, `src/protocol/sdk.js` builds events and applies them in-process through the same code path, and reports whether each event was applied.
+- **Validation.** `node src/protocol/validate.js events.jsonl` checks a recording of a producer's events and reports which states it actually produced.
+
+To see what it looks like without any model or API key, run the reference producer and watch the panel:
 
 ```bash
 node examples/protocol-producer.mjs --scenario permission --keep
 ```
 
-Record a producer's events and check them with `node src/protocol/validate.js events.jsonl`. To remove an integration, stop it from sending events; its sessions disappear when it ends them, when its process exits, or an hour after their last event.
+To remove an integration, stop it from sending events; its sessions disappear when it ends them, when its process exits, or an hour after their last event.
 
 ### Copilot CLI setup (if using GitHub Copilot CLI)
 
@@ -192,10 +222,10 @@ The indicator shows which agent most needs your attention:
 | Status | Indicator | Meaning |
 |---|---|---|
 | Cooking | 🟡 | Agent is actively working (executing tools, streaming messages) |
-| Your Turn | 🟠 | Agent requires your input, approval, or permission |
-| Done | 🟢 | Agent finished successfully (seen via explicit session metadata) |
-| Burn | 🔴 | Agent encountered a fatal error or unrecoverable failure |
-| Unknown | ⚪ | Evidence is insufficient, inconsistent, or ambiguous |
+| Your Turn | 🟠 | Agent requires your input, approval, or permission. Also shown when you cancel a turn, or when a turn ends and the agent does not report whether it succeeded |
+| Done | 🟢 | Agent finished successfully, shown only on explicit success evidence from the agent |
+| Burn | 🔴 | Agent reported an error or failure. A user cancel is not Burn (except OpenCode, see below) |
+| Unknown | ⚪ | Evidence is insufficient, inconsistent, or ambiguous, for example a stale session or an agent process that exited. Never treated as Done |
 
 ### Important limitations
 
@@ -252,13 +282,19 @@ node src/notify.js --test          # - Send one manual test notification via not
 ┌─────────────────┐
 │  OpenCode CLI   │
 │  Copilot CLI    │
+│  Claude Code    │
+│  Codex CLI      │
+│  Gemini CLI     │
+│  Protocol       │
+│  producers      │
 └────────┬────────┘
          │ (events, logs)
          ▼
 ┌─────────────────┐
-│ Agent Adapter   │
-│ (opencode/,     │
-│  copilot/)      │
+│ Agent Adapter / │
+│ hook bridge     │
+│ (src/adapters/, │
+│  src/hooks/)    │
 └────────┬────────┘
          │ (normalized session JSON)
          ▼
@@ -318,12 +354,15 @@ npm install  # (no packages installed; kept for potential future additions)
 npm test
 ```
 
-Runs 12 test files covering:
+Runs 23 test files covering:
 
 - State normalization and aggregation
-- Adapter contract and session discovery
+- Adapter contract, adapter conformance and session discovery
+- The shared lifecycle contract and hook bridge
 - Copilot session/event mapping
 - OpenCode event/tool-hook mapping
+- Claude Code, Codex CLI and Gemini CLI hook mapping (synthetic fixtures)
+- Event protocol: schema, adapter, SDK, validator and reference producer
 - Integration scenarios (OpenCode plugin, Copilot polling)
 - Filesystem operations and hardening
 - Notification eligibility and deduplication
@@ -456,7 +495,9 @@ Each command is an independent test. Ready-to-run assertions are included in eve
 
 - **Published?**: No. Local installation only.
 - **Declared GNOME versions**: 42–44 (`extension-legacy/`) and 45–47 (`extension/`). Only GNOME 43 (legacy variant, Wayland) has been used on a real desktop. The ESM variant passes syntax, packaging, and mocked behavior tests but has not been run in a real GNOME 45–47 session.
-- **Agent adapters implemented**: OpenCode, GitHub Copilot CLI.
+- **Native adapters**: OpenCode and GitHub Copilot CLI have been checked against the real agents. Claude Code, Codex CLI and Gemini CLI are implemented and fixture-tested only; Codex never reports Burn, and Gemini never reports Done or Burn.
+- **Event protocol**: implemented (schema 1) and tested with the reference producer only; no third-party CLI verified.
+- **Deferred**: Goose.
 - **Development focus**: Personal workflow validation. No roadmap promises.
 
 ## License

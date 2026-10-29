@@ -12,6 +12,14 @@
   "engines": {
     "node": ">=20.3"
   },
-  "author": "",
-  "license": "MIT"
+  "author": "itsfarid",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/itsfarid/LetItCook.git"
+  },
+  "homepage": "https://github.com/itsfarid/LetItCook",
+  "bugs": {
+    "url": "https://github.com/itsfarid/LetItCook/issues"
+  }
 }

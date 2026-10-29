@@ -3,10 +3,10 @@
 # 🍳 LetItCook
 
 **Project Type:** Personal Linux Desktop Utility  
-**Status:** Pre-development / Research & Prototyping  
+**Status:** Working prototype in personal use (no versioned releases)\
 **Primary Platform:** Linux + GNOME  
 **Primary UI:** GNOME Shell Top Panel  
-**Initial Agents:** OpenCode, Goose  
+**Native adapters:** OpenCode, GitHub Copilot CLI, Claude Code, Codex CLI, Gemini CLI (see §28)\
 **Deployment:** Local installation initially  
 **Development Strategy:** Personal-first, generalize later
 
@@ -176,14 +176,20 @@ The project should prioritize the developer's current GNOME environment and Linu
 
 ---
 
-## 5. Initial Agents
+## 5. Agents
 
-The initial target agents are:
+The project started with OpenCode and Goose as its intended first agents.
+Goose was deferred after research (see §28 and `docs/adapters.md`), and
+GitHub Copilot CLI became the second agent instead.
 
-1. OpenCode
-2. Goose
+Current integrations, by maturity (details in §28):
 
-Additional agents may be supported later.
+1. **Native adapters checked against the real agent:** OpenCode, GitHub Copilot CLI.
+2. **Native adapters, fixture-tested only:** Claude Code, Codex CLI (no Burn),
+   Gemini CLI (partial: no Done or Burn).
+3. **Generic event protocol:** implemented, tested with the reference producer
+   only; no third-party CLI verified.
+4. **Deferred:** Goose.
 
 Do not add agents merely to increase the supported-agent list.
 
@@ -506,6 +512,11 @@ Discover whether it is useful
 
 ## 17. Development Phases
 
+Current position: Phases 1 and 2 are implemented, Phase 3 (personal
+testing) is ongoing, and Phase 4 (Goose) is deferred. Copilot CLI,
+Claude Code, Codex CLI, Gemini CLI and the event protocol were added
+alongside Phase 3.
+
 ### Phase 0 — Existing Tool Evaluation
 
 Use existing tools such as OpenCode Status Pill.
@@ -574,6 +585,9 @@ Record actual problems rather than hypothetical ones.
 ### Phase 4 — Goose
 
 Investigate Goose lifecycle/event mechanisms and implement a Goose adapter.
+
+**Outcome:** investigated and deferred. Goose fires no hook for approval
+requests and its `Stop` hook has no outcome (see §28 and `docs/adapters.md`).
 
 ### Phase 5 — Refinement
 
@@ -809,7 +823,9 @@ Current decisions:
 
 **Implementation:** GNOME Shell Extension
 
-**Initial agents:** OpenCode + GitHub Copilot CLI
+**Agents:** OpenCode + GitHub Copilot CLI (checked against the real agents);
+Claude Code, Codex CLI, Gemini CLI (fixture-tested only); generic event
+protocol; Goose deferred
 
 **Deployment:** Local
 
