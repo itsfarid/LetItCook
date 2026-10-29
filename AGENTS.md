@@ -3,10 +3,10 @@
 # 🍳 LetItCook
 
 **Project Type:** Personal Linux Desktop Utility  
-**Status:** Working prototype in personal use (no versioned releases)  
+**Status:** Working prototype in personal use (no versioned releases)\
 **Primary Platform:** Linux + GNOME  
 **Primary UI:** GNOME Shell Top Panel  
-**Native adapters:** OpenCode, GitHub Copilot CLI, Claude Code, Codex CLI, Gemini CLI (see §28)  
+**Native adapters:** OpenCode, GitHub Copilot CLI, Claude Code, Codex CLI, Gemini CLI (see §28)\
 **Deployment:** Local installation initially  
 **Development Strategy:** Personal-first, generalize later
 
